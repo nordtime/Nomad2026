@@ -32,13 +32,20 @@ private:
     void openPatch();
     void savePatch();
     void savePatchAs();
+    void saveSelectionAsSnippet();
+    void importSnippet();
+    void importSnippetFromFile(const juce::File& file, int dropSection = -1, juce::Point<int> dropGrid = {});
+    void insertSnippetWithUndo(const Patch& snippet, int dropSection, juce::Point<int> dropGrid,
+                               int& insertedModules, int& insertedCables);
     void uploadToActiveSlot();
     void storePatchToBank();
     void loadPatchFromFile(const juce::File& file);
     bool savePatchToFile(const juce::File& file);
 
+    void showEditorOptionsDialog();
     void showMidiSettingsDialog();
     void showPatchSettingsDialog();
+    void showSynthSettingsDialog();
     void showBetaWarning(bool forceShow = false);
     void randomizeParameters(bool gaussian);
     void initializeModule(int section, Module* module);

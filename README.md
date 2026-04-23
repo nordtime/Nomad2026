@@ -218,8 +218,8 @@ application that runs on macOS, Windows, and Linux without requiring Java.
   - Always starts Dark; no persistence
 
 ### Next Up
-- [ ] **Synth DSP load indicator** — DSP bar in header + Voice/DSP in status bar (requires research into how original editor calculates total DSP capacity)
-- [ ] **Synth Settings Dialog** (Ctrl+G) — synth name, MIDI channels, clock, master tune, knob mode, pedal polarity, etc.
+- [x] **Synth DSP load indicator** — DSP bar in header + Voice/DSP in status bar (requires research into how original editor calculates total DSP capacity)
+- [x] **Synth Settings Dialog** (Ctrl+G) — synth name, MIDI channels, clock, master tune, knob mode, pedal polarity, etc.
 - [ ] **Morph overlay display** — F7 shows morph group assignments on modules, F5 shows morph ranges (start/end values)
 
 ## Roadmap
@@ -241,7 +241,7 @@ This section outlines all planned features to achieve feature parity with the or
 - [x] **Multi-Slot Support** - All 4 slots (A, B, C, D) with independent patches, undo, and sync
 
 ### Synth Communication
-- [ ] **Synth Settings Dialog** (Ctrl+G) - Configure synth parameters:
+- [x] **Synth Settings Dialog** (Ctrl+G) - Configure synth parameters:
   - Synth name editing
   - MIDI channel assignment per slot (1-16)
   - MIDI clock (Internal/External, BPM, Global sync)
@@ -264,7 +264,7 @@ This section outlines all planned features to achieve feature parity with the or
   - Progress bar with overwrite warning
 
 ### Editor Preferences
-- [ ] **Editor Options Dialog** - Configure editor behavior:
+- [x] **Editor Options Dialog** - Configure editor behavior:
   - **Cable Style**: Straight 3D, Curved 3D (default), Straight Thin, Curved Thin
   - **Knob Control**: Circular, Horizontal (default), Vertical
   - **Auto Upload**: Automatically send parameter changes to synth
@@ -310,12 +310,15 @@ This section outlines all planned features to achieve feature parity with the or
   - **Parameter Lock**: Right-click any parameter to lock/unlock it from randomization (lock icon indicator)
   - Locked parameters are preserved across randomize operations
   - Full undo/redo support
-- [ ] **Snippet System** - Save and reuse module groups
-  - Select modules on canvas → right-click → "Save Selection as Snippet"
-  - Saves selected modules + internal cables + parameters as partial .pch
-  - Module indices reindexed on import to avoid collisions
-  - Insert via drag & drop from browser, or File → Import Snippet
-  - Full undo/redo support for snippet insertion
+- [x] **Snippet System** - Save and reuse module groups
+  - [x] Select modules on canvas → right-click → "Save Selection as Snippet"
+  - [x] Edit menu action: "Save Selection as Snippet..."
+  - [x] Saves selected modules + internal cables + parameters as partial .pch
+  - [x] File/Edit menu action: "Import Snippet..."
+  - [x] Import reindexes module/container indices automatically to avoid collisions
+  - [x] Imported snippets keep internal parameter values and internal cables
+  - [x] Insert via drag & drop from browser (Snippets section in right browser panel)
+  - [x] Full undo/redo support for snippet insertion
 - [ ] **Preset Browser Window** (Ctrl+B) - Bitwig-style standalone browser for patches and snippets
   - Separate resizable window (not embedded in canvas), toggle open/close
   - **User Preset Library**: configurable root folder for .pch files, set on first launch

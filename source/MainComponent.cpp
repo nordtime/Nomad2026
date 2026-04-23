@@ -1,14 +1,63 @@
 #include "MainComponent.h"
 #include "model/PatchParser.h"
 #include "model/PchFileIO.h"
+#include "ui/EditorOptionsDialog.h"
 #include "ui/MidiSettingsDialog.h"
 #include "ui/PatchLocationDialog.h"
 #include "ui/PatchSettingsDialog.h"
+#include "ui/SynthSettingsDialog.h"
 #include "protocol/StorePatchMessage.h"
 #include "protocol/MorphKeyboardAssignmentMessage.h"
 #include "BinaryData.h"
 #include <iostream>
 #include <set>
+#include <climits>
+#include <tuple>
+
+namespace
+{
+Module* findOwnerModule(const ModuleContainer& container, const Connector* connector)
+{
+  if (connector == nullptr)
+    return nullptr;
+
+  for (const auto& modPtr : container.getModules())
+  {
+    for (const auto& c : modPtr->getConnectors())
+      if (&c == connector)
+        return modPtr.get();
+  }
+  return nullptr;
+}
+
+bool isPlacementFree(const ModuleContainer& container, int gx, int gy, int height)
+{
+  for (const auto& modPtr : container.getModules())
+  {
+    const auto* desc = modPtr->getDescriptor();
+    if (desc == nullptr)
+      continue;
+
+    auto pos = modPtr->getPosition();
+    int mTop = pos.y;
+    int mBottom = pos.y + desc->height - 1;
+    int nTop = gy;
+    int nBottom = gy + height - 1;
+
+    if (pos.x == gx && !(nBottom < mTop || nTop > mBottom))
+      return false;
+  }
+  return true;
+}
+
+juce::File getDefaultSnippetDirectory()
+{
+  auto dir = juce::File::getCurrentWorkingDirectory().getChildFile("snippets");
+  if (!dir.exists())
+    dir.createDirectory();
+  return dir;
+}
+}
 
 MainComponent::MainComponent(juce::ApplicationProperties &props)
     : appProperties(props) {
@@ -67,6 +116,16 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
 
   // Main layout
   mainLayout = std::make_unique<MainLayout>(moduleDescs);
+  mainLayout->setApplicationProperties(&appProperties);
+  
+  if (auto* p = appProperties.getUserSettings()) {
+      int themeId = p->getIntValue("ThemeId", 1);
+      if (themeId == 0)
+          mainLayout->setTheme(kClassicTheme, ThemeId::Classic);
+      else
+          mainLayout->setTheme(kDarkTheme, ThemeId::Dark);
+  }
+
   addAndMakeVisible(mainLayout.get());
 
   // Wire connection manager status updates to UI
@@ -234,6 +293,10 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
     opts.useNativeTitleBar = true;
     opts.resizable = false;
     opts.launchAsync();
+  };
+
+  mainLayout->getPatchBrowser().onSnippetDoubleClicked = [this](const juce::File& file) {
+    importSnippetFromFile(file);
   };
 
   connectionManager.setPatchDataCallback(
@@ -512,6 +575,14 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
         initializeModule(section, module);
       });
 
+  mainLayout->getCanvas().setSaveSnippetCallback(
+      [this]() { saveSelectionAsSnippet(); });
+
+  mainLayout->getCanvas().setSnippetDropCallback(
+      [this](const juce::File& file, int section, int gridX, int gridY) {
+        importSnippetFromFile(file, section, { gridX, gridY });
+      });
+
   // Wire cable visibility toggles to repaint the canvas
   mainLayout->getHeaderBar().setCableVisibilityCallback(
       [this]() { mainLayout->getCanvas().repaintCanvas(); });
@@ -550,6 +621,7 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
     else if (cmd == "open")  openPatch();
     else if (cmd == "save")  savePatch();
     else if (cmd == "patchSettings") showPatchSettingsDialog();
+    else if (cmd == "synthSettings") showSynthSettingsDialog();
     else if (cmd == "randomize") randomizeParameters(false);
     else if (cmd == "randomizeGaussian") randomizeParameters(true);
   });
@@ -686,6 +758,7 @@ juce::PopupMenu MainComponent::getMenuForIndex(int menuIndex,
   {
     menu.addItem(1, "New Patch\tCtrl+N");
     menu.addItem(2, "Open...\tCtrl+O");
+    menu.addItem(5, "Import Snippet...");
     menu.addSeparator();
     menu.addItem(3, "Save\tCtrl+S");
     menu.addItem(4, "Save As...");
@@ -703,7 +776,12 @@ juce::PopupMenu MainComponent::getMenuForIndex(int menuIndex,
     bool hasPatch = (currentPatch() != nullptr);
     menu.addItem(22, "Randomize (Simple)\tCtrl+R", hasPatch);
     menu.addItem(23, "Randomize (Gaussian)\tCtrl+Shift+R", hasPatch);
+    menu.addItem(24, "Save Selection as Snippet...", hasPatch && !mainLayout->getCanvas().getSelectedModules().empty());
+    menu.addItem(25, "Import Snippet...", hasPatch);
+    menu.addSeparator();
+    menu.addItem(26, "Preferences...");
   } else if (menuIndex == 2) // View
+
   {
     float zoom = mainLayout->getCanvas().getZoomLevel();
     menu.addItem(60, "Zoom In\tCtrl++");
@@ -725,6 +803,7 @@ juce::PopupMenu MainComponent::getMenuForIndex(int menuIndex,
   else if (menuIndex == 3) // Device
   {
     menu.addItem(30, "MIDI Settings...");
+    menu.addItem(34, "Synth Settings...\tCtrl+G");
     menu.addSeparator();
     bool connected = connectionManager.isConnected();
     menu.addItem(31, "Request Patch from Synth", connected);
@@ -783,6 +862,9 @@ void MainComponent::menuItemSelected(int menuItemID, int) {
   case 4:
     savePatchAs();
     break;
+  case 5:
+    importSnippet();
+    break;
   case 8:
     showPatchSettingsDialog();
     break;
@@ -803,8 +885,20 @@ void MainComponent::menuItemSelected(int menuItemID, int) {
   case 23:
     randomizeParameters(true);
     break;
+  case 24:
+    saveSelectionAsSnippet();
+    break;
+  case 25:
+    importSnippet();
+    break;
+  case 26:
+    showEditorOptionsDialog();
+    break;
   case 30:
     showMidiSettingsDialog();
+    break;
+  case 34:
+    showSynthSettingsDialog();
     break;
   case 31:
     connectionManager.requestPatch(connectionManager.getCurrentSlot());
@@ -862,9 +956,17 @@ void MainComponent::menuItemSelected(int menuItemID, int) {
     break;
   case 70:  // Theme: Classic
     mainLayout->setTheme(kClassicTheme, ThemeId::Classic);
+    if (auto* p = appProperties.getUserSettings()) {
+        p->setValue("ThemeId", 0);
+        appProperties.saveIfNeeded();
+    }
     break;
   case 71:  // Theme: Dark
     mainLayout->setTheme(kDarkTheme, ThemeId::Dark);
+    if (auto* p = appProperties.getUserSettings()) {
+        p->setValue("ThemeId", 1);
+        appProperties.saveIfNeeded();
+    }
     break;
 
   default:
@@ -987,6 +1089,303 @@ void MainComponent::savePatchAs() {
             currentPatchFile() = file;
         }
       });
+}
+
+void MainComponent::saveSelectionAsSnippet() {
+  if (currentPatch() == nullptr)
+    return;
+
+  auto selected = mainLayout->getCanvas().getSelectedModules();
+  if (selected.empty()) {
+    juce::AlertWindow::showMessageBoxAsync(
+        juce::MessageBoxIconType::InfoIcon,
+        "Save Selection as Snippet",
+        "Select one or more modules first.");
+    return;
+  }
+
+  int minX[2] = { INT_MAX, INT_MAX };
+  int minY[2] = { INT_MAX, INT_MAX };
+  for (const auto& sel : selected) {
+    auto* mod = sel.first;
+    int section = sel.second;
+    if (!mod || section < 0 || section > 1)
+      continue;
+    auto pos = mod->getPosition();
+    minX[section] = std::min(minX[section], pos.x);
+    minY[section] = std::min(minY[section], pos.y);
+  }
+  for (int s = 0; s < 2; ++s) {
+    if (minX[s] == INT_MAX) minX[s] = 0;
+    if (minY[s] == INT_MAX) minY[s] = 0;
+  }
+
+  auto snippet = std::make_shared<Patch>();
+  snippet->setName("Snippet");
+
+  std::map<Module*, Module*> oldToNew;
+  std::set<Module*> selectedSet;
+
+  for (const auto& sel : selected)
+  {
+    auto* oldMod = sel.first;
+    int section = sel.second;
+    if (!oldMod || section < 0 || section > 1)
+      continue;
+
+    selectedSet.insert(oldMod);
+    const auto* desc = oldMod->getDescriptor();
+    if (desc == nullptr)
+      continue;
+
+    auto pos = oldMod->getPosition();
+    auto* newMod = snippet->createModule(section, desc->index,
+                                         pos.x - minX[section],
+                                         pos.y - minY[section],
+                                         oldMod->getTitle(), moduleDescs);
+    if (newMod == nullptr)
+      continue;
+
+    auto& srcParams = oldMod->getParameters();
+    auto& dstParams = newMod->getParameters();
+    for (size_t i = 0; i < srcParams.size() && i < dstParams.size(); ++i)
+      dstParams[i].setValue(srcParams[i].getValue());
+
+    oldToNew[oldMod] = newMod;
+  }
+
+  for (int section = 0; section <= 1; ++section)
+  {
+    const auto& srcContainer = currentPatch()->getContainer(section);
+    auto& dstContainer = snippet->getContainer(section);
+    std::set<std::tuple<int, int, int, int>> added;
+
+    for (const auto& cable : srcContainer.getConnections())
+    {
+      Module* srcOld = findOwnerModule(srcContainer, cable.output);
+      Module* dstOld = findOwnerModule(srcContainer, cable.input);
+      if (srcOld == nullptr || dstOld == nullptr)
+        continue;
+      if (!selectedSet.count(srcOld) || !selectedSet.count(dstOld))
+        continue;
+      if (!oldToNew.count(srcOld) || !oldToNew.count(dstOld))
+        continue;
+
+      const auto* srcDesc = cable.output ? cable.output->getDescriptor() : nullptr;
+      const auto* dstDesc = cable.input ? cable.input->getDescriptor() : nullptr;
+      if (srcDesc == nullptr || dstDesc == nullptr)
+        continue;
+
+      auto* srcNew = oldToNew[srcOld];
+      auto* dstNew = oldToNew[dstOld];
+      auto key = std::make_tuple(srcNew->getContainerIndex(), srcDesc->index,
+                                 dstNew->getContainerIndex(), dstDesc->index);
+      if (!added.insert(key).second)
+        continue;
+
+      auto* outConn = srcNew->getConnector(srcDesc->index, srcDesc->isOutput);
+      auto* inConn = dstNew->getConnector(dstDesc->index, dstDesc->isOutput);
+      if (outConn && inConn)
+        dstContainer.addConnection(outConn, inConn);
+    }
+  }
+
+  auto chooser = std::make_shared<juce::FileChooser>(
+      "Save Selection as Snippet", getDefaultSnippetDirectory(), "*.pch");
+
+  chooser->launchAsync(
+      juce::FileBrowserComponent::saveMode |
+          juce::FileBrowserComponent::canSelectFiles,
+      [this, chooser, snippet](const juce::FileChooser &fc) {
+        auto result = fc.getResult();
+        if (result == juce::File())
+          return;
+
+        auto file = result.hasFileExtension(".pch")
+                        ? result
+                        : result.withFileExtension("pch");
+        PchFileIO io(moduleDescs);
+        bool ok = io.writeFile(*snippet, file);
+        if (ok) {
+          mainLayout->getStatusBar().showMessage(
+              "Snippet saved: " + file.getFileName(), 3000);
+          mainLayout->getPatchBrowser().setPatchList(connectionManager.getPatchList());
+        } else {
+          mainLayout->getStatusBar().showMessage(
+              "ERROR: Failed to save snippet: " + file.getFileName(), 5000);
+        }
+      });
+}
+
+void MainComponent::importSnippet() {
+  if (currentPatch() == nullptr)
+    return;
+
+  auto chooser = std::make_shared<juce::FileChooser>(
+      "Import Snippet", getDefaultSnippetDirectory(), "*.pch");
+
+  chooser->launchAsync(
+      juce::FileBrowserComponent::openMode |
+          juce::FileBrowserComponent::canSelectFiles,
+      [this, chooser](const juce::FileChooser &fc) {
+        auto result = fc.getResult();
+        if (result.existsAsFile())
+          importSnippetFromFile(result);
+      });
+}
+
+void MainComponent::insertSnippetWithUndo(const Patch& snippet, int dropSection, juce::Point<int> dropGrid,
+                                          int& insertedModules, int& insertedCables) {
+  if (!undoContext() || currentPatch() == nullptr)
+    return;
+
+  int remapSection[2] = { 0, 1 };
+  int nonEmptySection = -1;
+  int nonEmptyCount = 0;
+  for (int s = 0; s <= 1; ++s) {
+    if (!snippet.getContainer(s).getModules().empty()) {
+      nonEmptySection = s;
+      ++nonEmptyCount;
+    }
+  }
+  if (dropSection >= 0 && dropSection <= 1 && nonEmptyCount == 1 && nonEmptySection >= 0)
+    remapSection[nonEmptySection] = dropSection;
+
+  undoManager().beginNewTransaction("Insert Snippet");
+
+  for (int sourceSection = 0; sourceSection <= 1; ++sourceSection)
+  {
+    const auto& srcContainer = snippet.getContainer(sourceSection);
+    if (srcContainer.getModules().empty())
+      continue;
+
+    int targetSection = remapSection[sourceSection];
+    auto& dstContainer = currentPatch()->getContainer(targetSection);
+
+    int minX = INT_MAX, minY = INT_MAX;
+    for (const auto& modPtr : srcContainer.getModules())
+    {
+      auto pos = modPtr->getPosition();
+      minX = std::min(minX, pos.x);
+      minY = std::min(minY, pos.y);
+    }
+    if (minX == INT_MAX) minX = 0;
+    if (minY == INT_MAX) minY = 0;
+
+    int baseX = (dropSection == targetSection) ? dropGrid.x : 1;
+    int baseY = (dropSection == targetSection) ? dropGrid.y : 1;
+
+    std::map<int, int> oldIndexToNewIndex;
+
+    for (const auto& srcModPtr : srcContainer.getModules())
+    {
+      const auto* desc = srcModPtr->getDescriptor();
+      if (desc == nullptr)
+        continue;
+
+      auto pos = srcModPtr->getPosition();
+      int gx = juce::jlimit(0, 39, baseX + (pos.x - minX));
+      int gy = juce::jmax(0, baseY + (pos.y - minY));
+
+      while (gy < 128 && !isPlacementFree(dstContainer, gx, gy, desc->height))
+        ++gy;
+      if (gy >= 128)
+        continue;
+
+      auto* addAction = new AddModuleAction(*undoContext(), targetSection, desc->index,
+                                            gx, gy, srcModPtr->getTitle());
+      if (!undoManager().perform(addAction))
+        continue;
+
+      int newModuleIndex = addAction->getContainerIndex();
+      oldIndexToNewIndex[srcModPtr->getContainerIndex()] = newModuleIndex;
+
+      auto* newMod = dstContainer.getModuleByIndex(newModuleIndex);
+      if (newMod != nullptr)
+      {
+        const auto& srcParams = srcModPtr->getParameters();
+        for (const auto& srcParam : srcParams)
+        {
+          auto* pd = srcParam.getDescriptor();
+          if (pd == nullptr)
+            continue;
+          auto* dstParam = newMod->getParameter(pd->index);
+          if (dstParam == nullptr)
+            continue;
+          int oldValue = dstParam->getValue();
+          int newValue = srcParam.getValue();
+          if (oldValue != newValue)
+            undoManager().perform(new ParameterChangeAction(*undoContext(), targetSection,
+                                                            newModuleIndex, pd->index,
+                                                            oldValue, newValue));
+        }
+      }
+
+      ++insertedModules;
+    }
+
+    std::set<std::tuple<int, int, int, int>> added;
+    for (const auto& cable : srcContainer.getConnections())
+    {
+      Module* srcOld = findOwnerModule(srcContainer, cable.output);
+      Module* dstOld = findOwnerModule(srcContainer, cable.input);
+      if (srcOld == nullptr || dstOld == nullptr)
+        continue;
+
+      auto itSrc = oldIndexToNewIndex.find(srcOld->getContainerIndex());
+      auto itDst = oldIndexToNewIndex.find(dstOld->getContainerIndex());
+      if (itSrc == oldIndexToNewIndex.end() || itDst == oldIndexToNewIndex.end())
+        continue;
+
+      const auto* outDesc = cable.output ? cable.output->getDescriptor() : nullptr;
+      const auto* inDesc = cable.input ? cable.input->getDescriptor() : nullptr;
+      if (outDesc == nullptr || inDesc == nullptr)
+        continue;
+
+      auto key = std::make_tuple(itSrc->second, outDesc->index, itDst->second, inDesc->index);
+      if (!added.insert(key).second)
+        continue;
+
+      if (undoManager().perform(new AddCableAction(*undoContext(), targetSection,
+          itSrc->second, outDesc->index, outDesc->isOutput,
+          itDst->second, inDesc->index, inDesc->isOutput, false)))
+      {
+        ++insertedCables;
+      }
+    }
+  }
+}
+
+void MainComponent::importSnippetFromFile(const juce::File& file, int dropSection, juce::Point<int> dropGrid) {
+  if (currentPatch() == nullptr)
+    return;
+
+  PchFileIO io(moduleDescs);
+  auto snippet = io.readFile(file);
+  if (snippet == nullptr) {
+    mainLayout->getStatusBar().showMessage(
+        "ERROR: Failed to import snippet: " + file.getFileName(), 5000);
+    return;
+  }
+
+  int insertedModules = 0;
+  int insertedCables = 0;
+  insertSnippetWithUndo(*snippet, dropSection, dropGrid, insertedModules, insertedCables);
+
+  mainLayout->getCanvas().repaintCanvas();
+  mainLayout->getInspector().refreshMorphList();
+  mainLayout->getHeaderBar().repaint();
+  updateDspLoadDisplay();
+  mainLayout->getPatchBrowser().setPatchList(connectionManager.getPatchList());
+
+  if (insertedModules > 0) {
+    mainLayout->getStatusBar().showMessage(
+        "Imported snippet: " + juce::String(insertedModules) + " modules, "
+        + juce::String(insertedCables) + " cables", 4000);
+  } else {
+    mainLayout->getStatusBar().showMessage(
+        "Snippet had no importable modules", 3000);
+  }
 }
 
 void MainComponent::loadPatchFromFile(const juce::File &file) {
@@ -1183,6 +1582,27 @@ void MainComponent::showMidiSettingsDialog() {
         handleConnectionRequest(inputId, outputId);
       },
       [this]() { handleDisconnectionRequest(); });
+}
+
+void MainComponent::showSynthSettingsDialog() {
+  SynthSettingsDialog::Result initialSettings;
+  // TODO: fill with actual hardware settings once protocol is implemented
+  
+  SynthSettingsDialog::show(
+      this, initialSettings,
+      [this](const SynthSettingsDialog::Result& r) {
+          // TODO: dispatch CC 0x17 (PatchHandling) SynthSettings to hardware
+          mainLayout->getStatusBar().showMessage("Synth Settings updated", 2000);
+      });
+}
+
+void MainComponent::showEditorOptionsDialog() {
+  EditorOptionsDialog::show(
+      appProperties,
+      [this]() {
+        mainLayout->getStatusBar().showMessage("Preferences updated", 2000);
+        mainLayout->repaint();
+      });
 }
 
 void MainComponent::handleConnectionRequest(const juce::String &inputId,
@@ -1797,7 +2217,12 @@ void MainComponent::randomizeParameters(bool gaussian) {
   processContainer(currentPatch()->getPolyVoiceArea(), 1);
   processContainer(currentPatch()->getCommonArea(), 0);
 
-  if (changes.empty()) return;
+  if (changes.empty()) {
+    juce::String scope = hasSelection ? "selection" : "patch";
+    mainLayout->getStatusBar().showMessage(
+        "No unlocked randomizable parameters in " + scope, 2500);
+    return;
+  }
 
   // Single undo transaction with batched synth upload
   int numChanges = static_cast<int>(changes.size());

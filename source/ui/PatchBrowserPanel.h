@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_core/juce_core.h>
 #include <vector>
 #include <string>
 
@@ -29,14 +30,16 @@ public:
     std::function<void(int section, int position)> onPatchDelete;
     std::function<void(int section, int position)> onPatchCopy;
     std::function<void(int section, int position)> onPatchMove;
+    std::function<void(const juce::File& file)> onSnippetDoubleClicked;
 
 private:
     class PatchTreeItem : public juce::TreeViewItem
     {
     public:
-        PatchTreeItem(const juce::String& name, int section = -1, int position = -1, PatchBrowserPanel* parent = nullptr);
+        PatchTreeItem(const juce::String& name, int section = -1, int position = -1, PatchBrowserPanel* parent = nullptr, const juce::String& snippetPath = {});
 
         bool mightContainSubItems() override;
+        juce::var getDragSourceDescription() override;
         void paintItem(juce::Graphics& g, int width, int height) override;
         void itemClicked(const juce::MouseEvent& e) override;
         void itemDoubleClicked(const juce::MouseEvent& e) override;
@@ -48,6 +51,7 @@ private:
         int section;   // -1 for root/bank nodes
         int position;  // -1 for root/bank nodes
         PatchBrowserPanel* panel;
+        juce::String snippetPath;
     };
 
     std::unique_ptr<juce::TreeView> treeView;
@@ -63,12 +67,16 @@ private:
 
     // Cached patch list
     std::vector<std::string> cachedPatchList;
+    juce::Array<juce::File> snippetFiles;
     juce::String currentSearchText;
     bool hideEmptySlots = false;
 
-    // Currently loaded patch location (-1 = unknown)
+    // Currently loaded patch tracking
     int loadedSection = -1;
     int loadedPosition = -1;
+
+    juce::File getSnippetDirectory() const;
+    void scanSnippetFiles();
 
     void rebuildTree(const std::vector<std::string>& names);
     void applyFilters();
