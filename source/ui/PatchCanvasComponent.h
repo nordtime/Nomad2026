@@ -40,6 +40,8 @@ public:
     using MidiCtrlAssignCallback = std::function<void(int section, int moduleId, int paramId, int midiCC)>;
     // Initialize module: section, module pointer
     using InitModuleCallback = std::function<void(int section, Module* module)>;
+    using SaveSnippetCallback = std::function<void()>;
+    using SnippetDropCallback = std::function<void(const juce::File& file, int section, int gridX, int gridY)>;
 
     PatchCanvas();
     ~PatchCanvas();
@@ -89,6 +91,8 @@ public:
     void setKnobAssignCallback(KnobAssignCallback cb) { knobAssignCallback = std::move(cb); }
     void setMidiCtrlAssignCallback(MidiCtrlAssignCallback cb) { midiCtrlAssignCallback = std::move(cb); }
     void setInitModuleCallback(InitModuleCallback cb) { initModuleCallback = std::move(cb); }
+    void setSaveSnippetCallback(SaveSnippetCallback cb) { saveSnippetCallback = std::move(cb); }
+    void setSnippetDropCallback(SnippetDropCallback cb) { snippetDropCallback = std::move(cb); }
     void setCableCreatedCallback(CableCallback cb) { cableCreatedCallback = std::move(cb); }
     void setCableDeletedCallback(CableCallback cb) { cableDeletedCallback = std::move(cb); }
     void setUndoCallback(std::function<void()> cb) { undoCallback = std::move(cb); }
@@ -96,6 +100,7 @@ public:
     // File command callback: "new", "open", "save", "close"
     using FileCommandCallback = std::function<void(const juce::String&)>;
     void setFileCommandCallback(FileCommandCallback cb) { fileCommandCallback = std::move(cb); }
+    void setApplicationProperties(juce::ApplicationProperties* props) { appProperties = props; }
     void setUndoManager(juce::UndoManager* um) { undoManager = um; }
 
     // DragAndDropTarget interface
@@ -190,11 +195,14 @@ private:
     KnobAssignCallback knobAssignCallback;
     MidiCtrlAssignCallback midiCtrlAssignCallback;
     InitModuleCallback initModuleCallback;
+    SaveSnippetCallback saveSnippetCallback;
+    SnippetDropCallback snippetDropCallback;
     CableCallback cableCreatedCallback;
     CableCallback cableDeletedCallback;
     std::function<void()> undoCallback;
     std::function<void()> redoCallback;
     FileCommandCallback fileCommandCallback;
+    juce::ApplicationProperties* appProperties = nullptr;
     juce::UndoManager* undoManager = nullptr;
 
     // Module drop preview
@@ -390,6 +398,18 @@ public:
         commonCanvas.setInitModuleCallback(std::move(cb));
     }
 
+    void setSaveSnippetCallback(PatchCanvas::SaveSnippetCallback cb)
+    {
+        polyCanvas.setSaveSnippetCallback(cb);
+        commonCanvas.setSaveSnippetCallback(std::move(cb));
+    }
+
+    void setSnippetDropCallback(PatchCanvas::SnippetDropCallback cb)
+    {
+        polyCanvas.setSnippetDropCallback(cb);
+        commonCanvas.setSnippetDropCallback(std::move(cb));
+    }
+
     /** Aggregate selected modules from both canvases */
     std::vector<std::pair<Module*, int>> getSelectedModules() const
     {
@@ -427,6 +447,12 @@ public:
     {
         polyCanvas.setFileCommandCallback(cb);
         commonCanvas.setFileCommandCallback(std::move(cb));
+    }
+
+    void setApplicationProperties(juce::ApplicationProperties* props)
+    {
+        polyCanvas.setApplicationProperties(props);
+        commonCanvas.setApplicationProperties(props);
     }
 
     void setUndoManager(juce::UndoManager* um)

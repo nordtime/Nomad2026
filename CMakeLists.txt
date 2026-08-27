@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.22)
-project(Nomad2026 VERSION 0.1.0 LANGUAGES C CXX)
+project(Nomad2026 VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_subdirectory(JUCE)
-option(NOMAD_BUILD_PLUGIN "Build VST3/CLAP plugin targets" OFF)
+option(NOMAD_BUILD_PLUGIN "Build VST3/CLAP plugin targets" ON)
 
 if(NOMAD_BUILD_PLUGIN)
     set(CLAP_JUCE_EXTENSIONS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -29,11 +29,13 @@ set(NOMAD_SHARED_SOURCES
     source/ui/ModuleBrowserPanel.cpp
     source/ui/PatchCanvasComponent.cpp
     source/ui/ColorScheme.cpp
+    source/ui/EditorOptionsDialog.cpp
     source/ui/InspectorPanel.cpp
     source/ui/StatusBar.cpp
     source/ui/PatchHeaderBar.cpp
     source/ui/PatchLocationDialog.cpp
     source/ui/PatchSettingsDialog.cpp
+    source/ui/SynthSettingsDialog.cpp
     source/ui/MidiSettingsDialog.cpp
     source/ui/QuickAddPopup.cpp
     source/ui/PatchBrowserPanel.cpp
@@ -73,7 +75,7 @@ set(NOMAD_SHARED_SOURCES
 juce_add_gui_app(Nomad2026
     PRODUCT_NAME "Nomad2026"
     COMPANY_NAME "Nomad2026"
-    VERSION "0.1.0"
+    VERSION "0.2.0"
 )
 
 target_sources(Nomad2026 PRIVATE
@@ -89,11 +91,13 @@ if(NOMAD_BUILD_PLUGIN)
         FORMATS VST3 AU Standalone
         PRODUCT_NAME "Nomad2026"
         COMPANY_NAME "Nomad2026"
-        IS_MIDI_EFFECT TRUE
+        IS_SYNTH TRUE
+        IS_MIDI_EFFECT FALSE
         NEEDS_MIDI_INPUT TRUE
         NEEDS_MIDI_OUTPUT TRUE
         EDITOR_WANTS_KEYBOARD_FOCUS TRUE
-        VERSION "0.1.0"
+        VST3_CATEGORIES "Instrument" "Tools"
+        VERSION "0.2.0"
     )
 
     target_sources(Nomad2026Plugin PRIVATE

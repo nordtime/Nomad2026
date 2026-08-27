@@ -50,6 +50,7 @@ public:
     PatchCanvasComponent& getCanvas()      { return canvasComponent; }
     void setTheme(const ColorScheme& cs)   { canvasComponent.setTheme(cs); }
     void setTheme(const ColorScheme& cs, ThemeId id) { canvasComponent.setTheme(cs, id); }
+    void setApplicationProperties(juce::ApplicationProperties* props) { canvasComponent.setApplicationProperties(props); }
     InspectorPanel&       getInspector()   { return inspectorPanel; }
     PatchBrowserPanel&    getPatchBrowser() { return patchBrowserPanel; }
     StatusBar&            getStatusBar()   { return statusBar; }

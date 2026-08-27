@@ -435,7 +435,7 @@ void PatchCanvas::paint(juce::Graphics& g)
     if (showRubberBand)
     {
         auto rb = rubberBandRect.toFloat();
-        g.setColour(juce::Colour(0x33ffffff));
+        g.setColour(activeScheme_.selectionFill);
         g.fillRect(rb);
         g.setColour(activeScheme_.snapHighlight.withAlpha(0.8f));
         g.drawRect(rb, 1.5f);
@@ -684,7 +684,7 @@ void PatchCanvas::paintConnectors(juce::Graphics& g, const Module& m, juce::Rect
     if (m.getDescriptor()->index == 58) return;
 
     const int yTolerance = 12;
-    g.setColour(juce::Colour(0xff1a1a1a));
+    g.setColour(activeScheme_.connectorLine);
     for (auto& tc : theme.connectors)
     {
         if (tc.cssClass == "cSLAVE") continue;
@@ -1188,12 +1188,12 @@ void PatchCanvas::paintButtons(juce::Graphics& g, const Module& m, juce::Rectang
         // --- Increment buttons: draw arrow pairs ---
         if (tb.isIncrement)
         {
-            g.setColour(juce::Colour(0xff3a3a3a));
+            g.setColour(activeScheme_.incrementBg);
             g.fillRect(bx, by, bw, bh);
-            g.setColour(juce::Colour(0xff555555));
+            g.setColour(activeScheme_.incrementBorder);
             g.drawRect(bx, by, bw, bh, 1.0f);
 
-            g.setColour(juce::Colour(0xffcccccc));
+            g.setColour(activeScheme_.incrementFg);
             float cx = bx + bw * 0.5f;
             float cy = by + bh * 0.5f;
 
@@ -1239,7 +1239,7 @@ void PatchCanvas::paintButtons(juce::Graphics& g, const Module& m, juce::Rectang
                                static_cast<int>(bx), static_cast<int>(by + arrowH),
                                static_cast<int>(bw), static_cast<int>(valH),
                                juce::Justification::centred, false);
-                    g.setColour(juce::Colour(0xffcccccc));
+                    g.setColour(activeScheme_.incrementFg);
                 }
 
                 // Down arrow (bottom third)
@@ -1372,7 +1372,7 @@ void PatchCanvas::paintButtons(juce::Graphics& g, const Module& m, juce::Rectang
             float sx = bx + (bw - sq) * 0.5f;
             float sy = by + (bh - sq) * 0.5f;
 
-            juce::Colour muteBase = isOn ? juce::Colour(0xffcc4444) : moduleBg.darker(0.2f);
+            juce::Colour muteBase = isOn ? activeScheme_.muteActive : moduleBg.darker(0.2f);
             juce::Colour muteText = isOn ? juce::Colours::white : activeScheme_.buttonText;
             drawBevelSegment(sx, sy, sq, sq, isOn, muteBase, labelText, muteText);
 
@@ -2762,7 +2762,7 @@ void PatchCanvas::paintCustomDisplays(juce::Graphics& g, const Module& m, juce::
             float top     = dy + 1.0f;
             float bot     = dy + dh - 1.0f;
 
-            g.setColour(juce::Colour(0xff00cc44));  // green routing lines (matches original)
+            g.setColour(activeScheme_.vocoderRouting);  // green routing lines (matches original)
             for (int i = 0; i < kBands; ++i)
             {
                 if (cd.bandIds[i].isEmpty()) continue;
@@ -2835,7 +2835,7 @@ void PatchCanvas::paintCustomDisplays(juce::Graphics& g, const Module& m, juce::
             float barX   = outX - 28.0f;  // bar well to the left of the labels (~x=209)
             float lineEnd = outX - 18.0f; // lines stop just before the label text (~x=219)
 
-            g.setColour(juce::Colour(0xff888888)); // grey
+            g.setColour(activeScheme_.bracketRouting); // grey
 
             // Horizontal line from in connector to bar, at BP level (centre of bracket)
             g.drawLine(inX + 7.0f, bpY, barX, bpY, 1.0f);
@@ -3007,34 +3007,50 @@ void PatchCanvas::paintCables(juce::Graphics& g, const ModuleContainer& containe
             default: cableCol = getSignalColour(conn.output->getDescriptor()->signalType); break;
         }
 
-        // Draw a curved cable with optional shake offset
+        // Draw a curved or straight cable
+        int cableStyle = 2; // Default to Curved 3D
+        if (appProperties && appProperties->getUserSettings())
+            cableStyle = appProperties->getUserSettings()->getIntValue("CableStyle", 2);
+
+        bool isStraight = (cableStyle == 1 || cableStyle == 3);
+        bool isThin = (cableStyle == 3 || cableStyle == 4);
+
         juce::Path path;
         path.startNewSubPath(srcPos.toFloat());
 
-        float midY = (srcPos.y + dstPos.y) * 0.5f;
-        float baseSag = std::abs(static_cast<float>(srcPos.x - dstPos.x)) * 0.15f + 15.0f;
+        if (isStraight)
+        {
+            path.lineTo(dstPos.toFloat());
+        }
+        else
+        {
+            float midY = (srcPos.y + dstPos.y) * 0.5f;
+            float baseSag = std::abs(static_cast<float>(srcPos.x - dstPos.x)) * 0.15f + 15.0f;
 
-        // Apply shake offset if present
-        float sagMultiplier = 1.0f;
-        auto key = std::make_pair(conn.output, conn.input);
-        auto it = cableSagOffsets.find(key);
-        if (it != cableSagOffsets.end())
-            sagMultiplier += it->second;
+            float sagMultiplier = 1.0f;
+            auto key = std::make_pair(conn.output, conn.input);
+            auto it = cableSagOffsets.find(key);
+            if (it != cableSagOffsets.end())
+                sagMultiplier += it->second;
 
-        float sag = baseSag * sagMultiplier;
+            float sag = baseSag * sagMultiplier;
 
-        path.cubicTo(static_cast<float>(srcPos.x), midY + sag,
-                     static_cast<float>(dstPos.x), midY + sag,
-                     static_cast<float>(dstPos.x), static_cast<float>(dstPos.y));
+            path.cubicTo(static_cast<float>(srcPos.x), midY + sag,
+                         static_cast<float>(dstPos.x), midY + sag,
+                         static_cast<float>(dstPos.x), static_cast<float>(dstPos.y));
+        }
+
+        float outlineThickness = isThin ? 2.5f : 4.0f;
+        float coreThickness    = isThin ? 1.5f : 2.5f;
 
         // Dark outline behind the cable for contrast
         g.setColour(juce::Colour(0xaa000000));
-        g.strokePath(path, juce::PathStrokeType(4.0f, juce::PathStrokeType::curved,
+        g.strokePath(path, juce::PathStrokeType(outlineThickness, juce::PathStrokeType::curved,
                                                  juce::PathStrokeType::rounded));
 
         // Colored cable on top (semi-transparent for better depth perception)
         g.setColour(cableCol.withAlpha(0.80f));
-        g.strokePath(path, juce::PathStrokeType(2.5f, juce::PathStrokeType::curved,
+        g.strokePath(path, juce::PathStrokeType(coreThickness, juce::PathStrokeType::curved,
                                                  juce::PathStrokeType::rounded));
     }
 }
@@ -3794,11 +3810,35 @@ void PatchCanvas::mouseDrag(const juce::MouseEvent& e)
 
     if (dragState.type == DragState::Knob)
     {
-        // Rotary control: vertical drag (down = increase, up = decrease)
-        int deltaY = dragState.startPos.y - currentPos.y;
-        float sensitivity = 0.5f;  // Adjust for feel
-        int valueDelta = static_cast<int>(deltaY * sensitivity);
-        newValue = juce::jlimit(pd->minValue, pd->maxValue, dragState.startValue + valueDelta);
+        int knobControl = 3; // Default Vertical
+        if (appProperties && appProperties->getUserSettings())
+            knobControl = appProperties->getUserSettings()->getIntValue("KnobControl", 3);
+
+        if (knobControl == 1) // Circular
+        {
+            // Use angle from center of the knob
+            juce::Point<int> center = dragState.startPos; // Approximation, startPos is click pos
+            juce::Point<int> offset = currentPos - center;
+            float angle = std::atan2(static_cast<float>(offset.x), static_cast<float>(-offset.y));
+            // Map angle to value (very basic approximation)
+            float normalized = (angle + juce::MathConstants<float>::pi) / (juce::MathConstants<float>::twoPi);
+            newValue = pd->minValue + static_cast<int>(normalized * (pd->maxValue - pd->minValue));
+        }
+        else if (knobControl == 2) // Horizontal
+        {
+            int deltaX = currentPos.x - dragState.startPos.x;
+            float sensitivity = 0.5f;
+            int valueDelta = static_cast<int>(deltaX * sensitivity);
+            newValue = juce::jlimit(pd->minValue, pd->maxValue, dragState.startValue + valueDelta);
+        }
+        else // Vertical
+        {
+            // Rotary control: vertical drag (down = increase, up = decrease)
+            int deltaY = dragState.startPos.y - currentPos.y;
+            float sensitivity = 0.5f;  // Adjust for feel
+            int valueDelta = static_cast<int>(deltaY * sensitivity);
+            newValue = juce::jlimit(pd->minValue, pd->maxValue, dragState.startValue + valueDelta);
+        }
     }
     else if (dragState.type == DragState::Slider)
     {
@@ -4093,6 +4133,8 @@ bool PatchCanvas::keyPressed(const juce::KeyPress& key)
             { fileCommandCallback("save"); return true; }
         if (key == juce::KeyPress('p', juce::ModifierKeys::commandModifier, 0))
             { fileCommandCallback("patchSettings"); return true; }
+        if (key == juce::KeyPress('g', juce::ModifierKeys::commandModifier, 0))
+            { fileCommandCallback("synthSettings"); return true; }
     }
 
     // F1 → show help popup for the selected/hovered module
@@ -4271,16 +4313,17 @@ bool PatchCanvas::isDragging(int section, int moduleId, int parameterId) const
 
 bool PatchCanvas::isInterestedInDragSource(const SourceDetails& dragSourceDetails)
 {
-    // Accept module drags from ModuleBrowserPanel
+    // Accept module and snippet drags from browser panels
     auto description = dragSourceDetails.description;
     if (!description.isObject())
         return false;
-
+    
     auto* obj = description.getDynamicObject();
     if (obj == nullptr)
         return false;
 
-    return obj->getProperty("type").toString() == "module";
+    auto type = obj->getProperty("type").toString();
+    return type == "module" || type == "snippet";
 }
 
 void PatchCanvas::itemDragEnter(const SourceDetails& dragSourceDetails)
@@ -4290,6 +4333,10 @@ void PatchCanvas::itemDragEnter(const SourceDetails& dragSourceDetails)
 
     auto* obj = dragSourceDetails.description.getDynamicObject();
     if (obj == nullptr)
+        return;
+
+    auto type = obj->getProperty("type").toString();
+    if (type != "module")
         return;
 
     dropPreviewTypeId = obj->getProperty("typeId");
@@ -4327,13 +4374,30 @@ void PatchCanvas::itemDropped(const SourceDetails& dragSourceDetails)
     if (obj == nullptr)
         return;
 
-    int typeId = obj->getProperty("typeId");
-    juce::String moduleName = obj->getProperty("name").toString();
-
+    auto type = obj->getProperty("type").toString();
     auto mousePos = screenToCanvas(dragSourceDetails.localPosition.toInt());
     int section = mySection;
     int dropX = juce::jlimit(0, 39, mousePos.x / PatchCanvas::gridX);
     int dropY = juce::jlimit(0, 127, mousePos.y / PatchCanvas::gridY);
+
+    if (type == "snippet")
+    {
+        juce::String filePath = obj->getProperty("file").toString();
+        juce::File snippetFile(filePath);
+        if (snippetDropCallback && snippetFile.existsAsFile())
+            snippetDropCallback(snippetFile, section, dropX, dropY);
+        repaint();
+        return;
+    }
+
+    if (type != "module")
+    {
+        repaint();
+        return;
+    }
+
+    int typeId = obj->getProperty("typeId");
+    juce::String moduleName = obj->getProperty("name").toString();
 
     // Trigger callback if set
     if (moduleDropCallback)
@@ -4346,6 +4410,53 @@ void PatchCanvas::itemDropped(const SourceDetails& dragSourceDetails)
 }
 
 // --- Parameter context menu ---
+
+namespace
+{
+class ToggleParameterLockAction : public juce::UndoableAction
+{
+public:
+    ToggleParameterLockAction(Patch* patchIn, int sectionIn, int moduleIdIn, int paramIdIn,
+                              bool oldLockedIn, bool newLockedIn, PatchCanvas* canvasIn)
+        : patch(patchIn), section(sectionIn), moduleId(moduleIdIn), paramId(paramIdIn),
+          oldLocked(oldLockedIn), newLocked(newLockedIn), canvas(canvasIn)
+    {
+    }
+
+    bool perform() override { return apply(newLocked); }
+    bool undo() override { return apply(oldLocked); }
+    int getSizeInUnits() override { return 1; }
+
+private:
+    bool apply(bool locked)
+    {
+        if (patch == nullptr)
+            return false;
+
+        auto& container = patch->getContainer(section);
+        auto* module = container.getModuleByIndex(moduleId);
+        if (module == nullptr)
+            return false;
+
+        auto* param = module->getParameter(paramId);
+        if (param == nullptr)
+            return false;
+
+        param->setLocked(locked);
+        if (canvas != nullptr)
+            canvas->repaint();
+        return true;
+    }
+
+    Patch* patch = nullptr;
+    int section = 0;
+    int moduleId = 0;
+    int paramId = 0;
+    bool oldLocked = false;
+    bool newLocked = false;
+    PatchCanvas* canvas = nullptr;
+};
+}
 
 void PatchCanvas::showParameterContextMenu(Module& m, int section, Parameter& param)
 {
@@ -4467,89 +4578,117 @@ void PatchCanvas::showParameterContextMenu(Module& m, int section, Parameter& pa
         menu.addSubMenu("MIDI Controller", midiSubMenu);
     }
 
+    int moduleIndex = m.getContainerIndex();
+    int paramIndex = pd->index;
+    juce::Component::SafePointer<PatchCanvas> safeThis(this);
+
     menu.showMenuAsync(juce::PopupMenu::Options{},
-        [this, &m, section, &param, currentKnob, currentMidiCtrl](int result)
+        [safeThis, section, moduleIndex, paramIndex, currentKnob, currentMidiCtrl](int result)
         {
-            auto* pd2 = param.getDescriptor();
-            if (pd2 == nullptr) return;
+            if (safeThis == nullptr || safeThis->patch == nullptr)
+                return;
+
+            auto& container = safeThis->patch->getContainer(section);
+            auto* module = container.getModuleByIndex(moduleIndex);
+            if (module == nullptr)
+                return;
+
+            auto* param = module->getParameter(paramIndex);
+            if (param == nullptr)
+                return;
+
+            auto* pd2 = param->getDescriptor();
+            if (pd2 == nullptr)
+                return;
 
             if (result == 3)
             {
-                // Toggle lock
-                param.setLocked(!param.isLocked());
-                repaint();
+                bool oldLocked = param->isLocked();
+                bool newLocked = !oldLocked;
+                if (safeThis->undoManager)
+                {
+                    safeThis->undoManager->beginNewTransaction(newLocked ? "Lock Parameter" : "Unlock Parameter");
+                    safeThis->undoManager->perform(new ToggleParameterLockAction(
+                        safeThis->patch, section, moduleIndex, paramIndex,
+                        oldLocked, newLocked, safeThis.getComponent()));
+                }
+                else
+                {
+                    param->setLocked(newLocked);
+                    safeThis->repaint();
+                }
             }
             else if (result == 1)
             {
                 // Set to default value
-                int oldVal = param.getValue();
-                param.setValue(pd2->defaultValue);
-                if (parameterChangeCallback)
-                    parameterChangeCallback(section, m.getContainerIndex(),
+                int oldVal = param->getValue();
+                param->setValue(pd2->defaultValue);
+                if (safeThis->parameterChangeCallback)
+                    safeThis->parameterChangeCallback(section, moduleIndex,
                                            pd2->index, pd2->defaultValue);
-                if (paramDragCompleteCallback && oldVal != pd2->defaultValue)
-                    paramDragCompleteCallback(section, m.getContainerIndex(),
+                if (safeThis->paramDragCompleteCallback && oldVal != pd2->defaultValue)
+                    safeThis->paramDragCompleteCallback(section, moduleIndex,
                                               pd2->index, oldVal, pd2->defaultValue);
-                repaint();
+                safeThis->repaint();
             }
             else if (result == 2)
             {
                 // Zero Morph: remove morph assignment entirely (group + range)
-                param.setMorphGroup(-1);
-                param.setMorphRange(0);
-                if (morphAssignCallback)
-                    morphAssignCallback(section, m.getContainerIndex(),
+                param->setMorphGroup(-1);
+                param->setMorphRange(0);
+                if (safeThis->morphAssignCallback)
+                    safeThis->morphAssignCallback(section, moduleIndex,
                                        pd2->index, -1);
-                repaint();
+                safeThis->repaint();
             }
             else if (result == 10)
             {
                 // Disable morph assignment
-                param.setMorphGroup(-1);
-                param.setMorphRange(0);
-                if (morphAssignCallback)
-                    morphAssignCallback(section, m.getContainerIndex(),
+                param->setMorphGroup(-1);
+                param->setMorphRange(0);
+                if (safeThis->morphAssignCallback)
+                    safeThis->morphAssignCallback(section, moduleIndex,
                                        pd2->index, -1);
-                repaint();
+                safeThis->repaint();
             }
             else if (result >= 11 && result <= 14)
             {
                 // Assign to morph group 0-3, start at range=0
                 int group = result - 11;
-                param.setMorphGroup(group);
-                param.setMorphRange(0);
-                if (morphAssignCallback)
-                    morphAssignCallback(section, m.getContainerIndex(),
+                param->setMorphGroup(group);
+                param->setMorphRange(0);
+                if (safeThis->morphAssignCallback)
+                    safeThis->morphAssignCallback(section, moduleIndex,
                                        pd2->index, group);
                 // Explicitly tell the synth range=0 so it matches our model
-                if (morphRangeChangeCallback)
-                    morphRangeChangeCallback(section, m.getContainerIndex(),
+                if (safeThis->morphRangeChangeCallback)
+                    safeThis->morphRangeChangeCallback(section, moduleIndex,
                                             pd2->index, 0, 0);
-                repaint();
+                safeThis->repaint();
             }
             // Knob assignment (99=disable, 100-122=assign knob 0-22)
             else if (result == 99)
             {
-                if (knobAssignCallback && currentKnob >= 0)
-                    knobAssignCallback(section, m.getContainerIndex(), pd2->index, -1);
+                if (safeThis->knobAssignCallback && currentKnob >= 0)
+                    safeThis->knobAssignCallback(section, moduleIndex, pd2->index, -1);
             }
             else if (result >= 100 && result < 123)
             {
                 int knob = result - 100;
-                if (knobAssignCallback)
-                    knobAssignCallback(section, m.getContainerIndex(), pd2->index, knob);
+                if (safeThis->knobAssignCallback)
+                    safeThis->knobAssignCallback(section, moduleIndex, pd2->index, knob);
             }
             // MIDI Controller assignment (199=disable, 200-319=assign CC 0-119)
             else if (result == 199)
             {
-                if (midiCtrlAssignCallback && currentMidiCtrl >= 0)
-                    midiCtrlAssignCallback(section, m.getContainerIndex(), pd2->index, -1);
+                if (safeThis->midiCtrlAssignCallback && currentMidiCtrl >= 0)
+                    safeThis->midiCtrlAssignCallback(section, moduleIndex, pd2->index, -1);
             }
             else if (result >= 200 && result < 320)
             {
                 int cc = result - 200;
-                if (midiCtrlAssignCallback)
-                    midiCtrlAssignCallback(section, m.getContainerIndex(), pd2->index, cc);
+                if (safeThis->midiCtrlAssignCallback)
+                    safeThis->midiCtrlAssignCallback(section, moduleIndex, pd2->index, cc);
             }
         });
 }
@@ -4846,6 +4985,7 @@ void PatchCanvas::showSelectionContextMenu()
     menu.addItem(1, "Duplicate");
     menu.addItem(2, "Duplicate with Cables");
     menu.addItem(3, "Copy");
+    menu.addItem(6, "Save Selection as Snippet...");
     menu.addSeparator();
     menu.addItem(5, "Initialize");
     menu.addSeparator();
@@ -4855,6 +4995,7 @@ void PatchCanvas::showSelectionContextMenu()
         if (result == 1) duplicateSelection(false);
         else if (result == 2) duplicateSelection(true);
         else if (result == 3) copySelectionToClipboard();
+        else if (result == 6) { if (saveSnippetCallback) saveSnippetCallback(); }
         else if (result == 4) deleteSelection();
         else if (result == 5) {
             if (initModuleCallback) {

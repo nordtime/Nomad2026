@@ -69,6 +69,7 @@ public:
     }
 
     int getSizeInUnits() override { return 1; }
+    int getContainerIndex() const { return containerIndex_; }
 
 private:
     UndoContext& ctx_;

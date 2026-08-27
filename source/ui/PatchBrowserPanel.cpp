@@ -1,6 +1,17 @@
 #include "PatchBrowserPanel.h"
 #include <iostream>
 
+namespace
+{
+juce::File getDefaultSnippetDirectory()
+{
+    auto dir = juce::File::getCurrentWorkingDirectory().getChildFile("snippets");
+    if (!dir.exists())
+        dir.createDirectory();
+    return dir;
+}
+}
+
 PatchBrowserPanel::PatchBrowserPanel()
 {
     // Status label for loading state
@@ -44,8 +55,7 @@ PatchBrowserPanel::PatchBrowserPanel()
     treeView->setIndentSize(20);
     addAndMakeVisible(*treeView);
 
-    setLoadingState(false);
-}
+    setLoadingState(false);    applyFilters();}
 
 void PatchBrowserPanel::paint(juce::Graphics& g)
 {
@@ -111,9 +121,7 @@ void PatchBrowserPanel::setPatchList(const std::vector<std::string>& names)
 
 void PatchBrowserPanel::applyFilters()
 {
-    if (cachedPatchList.empty())
-        return;
-
+    scanSnippetFiles();
     rebuildTree(cachedPatchList);
 }
 
@@ -175,12 +183,14 @@ void PatchBrowserPanel::rebuildTree(const std::vector<std::string>& names)
     rootItem.reset();
 
     // Create new root item
-    rootItem = std::make_unique<PatchTreeItem>("Synth Patches");
+    rootItem = std::make_unique<PatchTreeItem>("Browser");
 
     // Expected: 891 entries (9 banks × 99 positions)
     // names[section * 99 + position]
 
     bool hasSearchFilter = currentSearchText.isNotEmpty();
+
+    auto* synthRoot = new PatchTreeItem("Synth Patches", -1, -1, this);
 
     for (int section = 0; section < 9; ++section)
     {
@@ -228,7 +238,7 @@ void PatchBrowserPanel::rebuildTree(const std::vector<std::string>& names)
         // Only add bank if it has visible patches
         if (patchesAdded > 0)
         {
-            rootItem->addSubItem(bankItem);
+            synthRoot->addSubItem(bankItem);
             std::cout << "[INSPECTOR]   Added bank " << displaySection << " with " << patchesAdded << " patches" << std::endl;
         }
         else
@@ -238,6 +248,22 @@ void PatchBrowserPanel::rebuildTree(const std::vector<std::string>& names)
             delete bankItem;
         }
     }
+
+    if (synthRoot->getNumSubItems() > 0)
+        rootItem->addSubItem(synthRoot);
+    else
+        delete synthRoot;
+
+    auto* snippetsRoot = new PatchTreeItem("Snippets", -1, -1, this);
+    for (const auto& snippet : snippetFiles)
+    {
+        auto name = snippet.getFileNameWithoutExtension();
+        snippetsRoot->addSubItem(new PatchTreeItem(name, -1, -1, this, snippet.getFullPathName()));
+    }
+    if (snippetsRoot->getNumSubItems() > 0)
+        rootItem->addSubItem(snippetsRoot);
+    else
+        delete snippetsRoot;
 
     std::cout << "[INSPECTOR] Setting root item in tree view, rootItem=" << (void*)rootItem.get() << std::endl;
     std::cout << "[INSPECTOR] Root item has " << rootItem->getNumSubItems() << " sub-items" << std::endl;
@@ -252,15 +278,28 @@ void PatchBrowserPanel::rebuildTree(const std::vector<std::string>& names)
 
 // --- PatchTreeItem implementation ---
 
-PatchBrowserPanel::PatchTreeItem::PatchTreeItem(const juce::String& name, int sec, int pos, PatchBrowserPanel* parent)
-    : itemName(name), section(sec), position(pos), panel(parent)
+PatchBrowserPanel::PatchTreeItem::PatchTreeItem(const juce::String& name, int sec, int pos,
+                                                PatchBrowserPanel* parent, const juce::String& path)
+    : itemName(name), section(sec), position(pos), panel(parent), snippetPath(path)
 {
 }
 
 bool PatchBrowserPanel::PatchTreeItem::mightContainSubItems()
 {
     // Bank nodes (section >= 0, position == -1) can contain patches
-    return (section >= 0 && position == -1);
+    return (position == -1 && snippetPath.isEmpty());
+}
+
+juce::var PatchBrowserPanel::PatchTreeItem::getDragSourceDescription()
+{
+    if (snippetPath.isEmpty())
+        return {};
+
+    auto desc = new juce::DynamicObject();
+    desc->setProperty("type", "snippet");
+    desc->setProperty("file", snippetPath);
+    desc->setProperty("name", itemName);
+    return juce::var(desc);
 }
 
 void PatchBrowserPanel::PatchTreeItem::paintItem(juce::Graphics& g, int width, int height)
@@ -284,6 +323,12 @@ void PatchBrowserPanel::PatchTreeItem::paintItem(juce::Graphics& g, int width, i
         // Bank node — bold
         g.setColour(textColor);
         g.setFont(juce::Font(juce::FontOptions(13.0f)).boldened());
+        g.drawText(itemName, 4, 0, width - 4, height, juce::Justification::centredLeft, true);
+    }
+    else if (snippetPath.isNotEmpty())
+    {
+        g.setColour(juce::Colour(0xff99ddff));
+        g.setFont(juce::Font(juce::FontOptions(12.0f)));
         g.drawText(itemName, 4, 0, width - 4, height, juce::Justification::centredLeft, true);
     }
     else
@@ -324,12 +369,36 @@ void PatchBrowserPanel::PatchTreeItem::itemClicked(const juce::MouseEvent& e)
 
 void PatchBrowserPanel::PatchTreeItem::itemDoubleClicked(const juce::MouseEvent&)
 {
+    if (snippetPath.isNotEmpty() && panel && panel->onSnippetDoubleClicked)
+    {
+        panel->onSnippetDoubleClicked(juce::File(snippetPath));
+        return;
+    }
+
     // Double-click on a patch (not a bank): load it
     if (section >= 0 && position >= 0 && panel && panel->onPatchDoubleClicked)
     {
         std::cout << "[INSPECTOR] Double-clicked patch: section=" << section << " position=" << position << std::endl;
         panel->onPatchDoubleClicked(section, position);
     }
+}
+
+juce::File PatchBrowserPanel::getSnippetDirectory() const
+{
+    return getDefaultSnippetDirectory();
+}
+
+void PatchBrowserPanel::scanSnippetFiles()
+{
+    snippetFiles.clear();
+    auto dir = getSnippetDirectory();
+    if (!dir.isDirectory())
+        return;
+
+    auto files = dir.findChildFiles(juce::File::findFiles, false, "*.pch");
+    files.sort();
+    for (const auto& f : files)
+        snippetFiles.add(f);
 }
 
 void PatchBrowserPanel::PatchTreeItem::showContextMenu()
