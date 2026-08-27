@@ -47,6 +47,8 @@ struct ThemeButton
 struct ThemeLabel
 {
     int x = 0, y = 0;
+    int width = 120, height = 12;   // drawing box; defaults leave text left-aligned and roomy
+    bool centred = false;           // align="centre" centres the text inside width
     juce::String text;
 };
 
@@ -55,24 +57,22 @@ struct ThemeTextDisplay
     juce::String componentId;
     int x = 0, y = 0;
     int width = 40, height = 16;
-    bool noteFormat = false;        // true → display as note name (C4, D#3, etc.)
-    bool partialFormat = false;     // true → display as partial ratio (1:1, 2:1, etc.)
-    bool drumHzFormat = false;      // true → fmtDrumHz: 20*2^(v/24) Hz
-    bool drumPartialFormat = false; // true → fmtDrumPartials: 1:1/2:1/4:1 or x0.00
-    bool oscHzFormat = false;       // true → fmtOscHz: 440*2^((v-69)/12) Hz
-    bool lfoHzFormat = false;       // true → fmtLFOHz: 440*2^((v-177)/12), shows s or Hz
-    bool phaseFormat = false;       // true → fmtPhase: v*2.8125-180 degrees
-    bool bpmFormat = false;         // true → fmtBPM: piecewise linear, shows bpm
-    bool stepFormat = false;        // true → 0=OFF, 1-128=number (PatternGen steps)
-    bool adsrTimeFormat = false;    // true → fmtAdsrTime: lookup 128 entries (ms/s)
-    bool envAttackFormat = false;   // true → fmtEnvelopeAttack: lookup 128 entries
-    bool envReleaseFormat = false;  // true → fmtEnvelopeRelease: lookup 128 entries
-    bool filterHz1Format = false;   // true → 504*2^((v-64)/12) Hz (FilterA, FilterB)
-    bool filterHz2Format = false;   // true → 330*2^((v-60)/12) Hz (FilterC/D/E/F)
-    bool eqHzFormat = false;        // true → 471*2^((v-60)/12) Hz (EqMid, EqShelving)
-    bool eqGainFormat = false;      // true → (v-64)*0.28125 dB (EqMid, EqShelving)
-    bool eqBwFormat = false;        // true → v/75.0 Oct (EqMid bandwidth)
-    bool vowelFormat = false;       // true → vowel name: A/E/I/O/U/Y/AA/AE/OE (VocalFilter)
+
+    // Optional formatter name override (fmtXxx). When empty, the value is
+    // formatted using the descriptor's formatter from modules.xml.
+    // Used to match original Nomad UI for cases where modules.xml formatter
+    // (e.g. "value-64" on slave oscs) doesn't match the UI (partial ratio).
+    juce::String formatterOverride;
+
+    // Reads as a partial ratio ("1:1", "2:1") rather than through the
+    // descriptor's own formatter.
+    bool partialFormat = false;
+
+    // Draws the arrow steppers under the display, and hit-tests them. Separate
+    // from partialFormat: the LFO slaves and the random generators show the
+    // ratio but have no arrows in the original, where the value is set with the
+    // knob beside the display (issue #48).
+    bool partialArrows = false;
 };
 
 struct ThemeLight
@@ -120,6 +120,7 @@ struct ThemeCustomDisplay
     juce::String curveComponentId;   // <curve component-id="pN"> (curve type)
     juce::String bwComponentId;      // <bandwidth component-id="pN"> (EqMid)
     juce::String bandIds[16];        // <band0..band15 component-id="pN"> (Vocoder)
+    juce::String noteStepIds[16];    // <step0..step15 component-id="pN"> (NoteSeqB)
     // EQ display sub-element component IDs (eq-mid-display, eq-shelving-display)
     juce::String freqComponentId;    // <frequency component-id="pN">
     juce::String gainComponentId;    // <gain component-id="pN">
@@ -129,6 +130,19 @@ struct ThemeCustomDisplay
     juce::String typeComponentId;         // <type component-id="pN">
     juce::String slopeComponentId;        // <slope component-id="pN">
     juce::String gainControlComponentId;  // <gain-control component-id="pN">
+    // Distortion/dynamics display sub-element component IDs
+    juce::String overdriveComponentId;   // <overdrive  component-id="pN">
+    juce::String clipComponentId;        // <clip        component-id="pN">
+    juce::String symmetryComponentId;    // <symmetry   component-id="pN">
+    juce::String wavewrapComponentId;    // <wavewrap   component-id="pN">
+    juce::String thresholdComponentId;   // <threshold  component-id="pN"> (compressor/expander)
+    juce::String ratioComponentId;       // <ratio       component-id="pN">
+    juce::String refLevelComponentId;    // <ref-level  component-id="pN"> (compressor)
+    juce::String limiterComponentId;     // <limiter     component-id="pN"> (compressor)
+    juce::String gateComponentId;        // <gate        component-id="pN"> (expander)
+    juce::String feedbackComponentId;    // <feedback    component-id="pN"> (phaser)
+    juce::String peaksComponentId;       // <peaks       component-id="pN"> (phaser)
+    juce::String spreadComponentId;      // <spread      component-id="pN"> (phaser)
     // Multimode-routing bracket (FilterC / FilterD)
     int mmInX = 0, mmInY = 0;            // audio input connector centre
     int mmOutX = 0;                       // output connector centre x (HP/BP/LP share same x)
@@ -186,3 +200,4 @@ private:
 
     std::map<juce::String, ModuleTheme> themes;
 };
+

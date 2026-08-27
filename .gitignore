@@ -11,13 +11,19 @@ jdk8u482-b08/
 # Build output
 build/
 build-debug/
+build-rel/
 build-release/
 build-win/
 build-win-release/
+build-appimage/
+build-asan/
 cmake-build-*/
 Builds/
+dist/
+tools/
 JuceLibraryCode/
 CMakeUserPresets.json
+build.sh
 
 # IDE files
 .vscode/
@@ -50,15 +56,23 @@ run_with_logs.sh
 BUGFIX_SYNC_CRASHES.md
 SYNC_IMPLEMENTATION.md
 TESTING_INSTRUCTIONS.md
+error.log
+.directory
+.codex
 
 # Beta app builds
 Apps/
+# Distribution executables
+\#Ejecutables/
 
 # Implementation notes (local reference)
 Implementaciones/
 
 # Claude Code local data
 .claude/
+.agents/
+.superpowers/
+docs/superpowers/
 
 # LSP cache
 .cache/
@@ -67,3 +81,11 @@ Implementaciones/
 *.vst3
 *.clap
 *.component
+
+# mcp-bridge/ (Python) local environment/build artifacts
+mcp-bridge/.venv/
+mcp-bridge/__pycache__/
+mcp-bridge/*.egg-info/
+
+# MCP client registration - holds absolute paths to this checkout
+opencode.json

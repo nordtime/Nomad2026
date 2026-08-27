@@ -1,4 +1,5 @@
 #include "ModuleDescriptions.h"
+#include "ModuleTags.h"
 
 ModuleDescriptions::ModuleDescriptions() = default;
 
@@ -42,7 +43,10 @@ void ModuleDescriptions::parseModule(const juce::XmlElement& elem)
     desc.name        = elem.getStringAttribute("name");
     desc.fullname    = elem.getStringAttribute("fullname", desc.name);
     desc.category    = elem.getStringAttribute("category", "Other");
+    desc.tags        = getModuleTags(desc.name);
     if (desc.category == "Seqencer") desc.category = "Sequencer";  // typo in modules.xml
+    if (desc.category == "Morph" || elem.getStringAttribute("role") == "morph")
+        desc.instantiable = false;
 
     // Parse child elements
     for (auto* child = elem.getFirstChildElement(); child != nullptr; child = child->getNextElement())
@@ -135,7 +139,7 @@ juce::StringArray ModuleDescriptions::getCategories() const
 {
     juce::StringArray cats;
     for (auto& m : modules)
-        if (!cats.contains(m.category))
+        if (m.instantiable && !cats.contains(m.category))
             cats.add(m.category);
     return cats;
 }
@@ -144,7 +148,7 @@ std::vector<const ModuleDescriptor*> ModuleDescriptions::getModulesInCategory(co
 {
     std::vector<const ModuleDescriptor*> result;
     for (auto& m : modules)
-        if (m.category == category)
+        if (m.instantiable && m.category == category)
             result.push_back(&m);
     return result;
 }

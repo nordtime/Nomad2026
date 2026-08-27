@@ -1,26 +1,52 @@
 #include "MainComponent.h"
+#include "BinaryData.h"
+#include "ui/AppTheme.h"
+#include "ui/PatchCanvasComponent.h"
+#include "ui/ThemeRegistry.h"
 #include <juce_gui_basics/juce_gui_basics.h>
 
-class NomadApplication : public juce::JUCEApplication
+class NmeApplication : public juce::JUCEApplication
 {
 public:
-    const juce::String getApplicationName() override    { return "Nomad2026"; }
-    const juce::String getApplicationVersion() override { return "0.2.0"; }
+    const juce::String getApplicationName() override    { return "Animatek NME"; }
+    const juce::String getApplicationVersion() override { return JUCE_APPLICATION_VERSION_STRING; }
     bool moreThanOneInstanceAllowed() override           { return false; }
 
     void initialise(const juce::String&) override
     {
         juce::PropertiesFile::Options options;
-        options.applicationName = "Nomad2026";
+        options.applicationName = "AnimatekNME";
         options.filenameSuffix = ".settings";
         options.osxLibrarySubFolder = "Application Support";
+
+        // Migrate settings written under the old Nomad2026 name
+        auto oldOptions = options;
+        oldOptions.applicationName = "Nomad2026";
+        const auto oldFile = oldOptions.getDefaultFile();
+        const auto newFile = options.getDefaultFile();
+        if (oldFile.existsAsFile() && !newFile.existsAsFile())
+        {
+            newFile.getParentDirectory().createDirectory();
+            oldFile.copyFileTo(newFile);
+        }
+
         appProperties.setStorageParameters(options);
 
-        mainWindow = std::make_unique<MainWindow>(getApplicationName(), appProperties);
+        const auto savedOptions = EditorOptions::load(appProperties.getUserSettings());
+        AppTheme::setPalette(ThemeRegistry::get(savedOptions.uiThemeIndex).app);
+        mainWindow = std::make_unique<MainWindow>("Animatek NME - Nord Modular Editor G1", appProperties);
     }
 
     void shutdown() override
     {
+        if (mainWindow != nullptr)
+        {
+            if (auto* settings = appProperties.getUserSettings())
+            {
+                settings->setValue("mainWindowState", mainWindow->getWindowStateAsString());
+                settings->saveIfNeeded();
+            }
+        }
         mainWindow.reset();
     }
 
@@ -33,13 +59,25 @@ public:
     {
     public:
         explicit MainWindow(const juce::String& name, juce::ApplicationProperties& props)
-            : DocumentWindow(name, juce::Colour(0xff1a1a2e), allButtons)
+            : DocumentWindow(name, AppTheme::palette().backgroundMain, allButtons)
         {
             setUsingNativeTitleBar(true);
+            applyWindowIcon();
             setContentOwned(new MainComponent(props), true);
             setResizable(true, true);
             centreWithSize(getWidth(), getHeight());
+
+            // Restore last size/position/maximized state; JUCE clamps it back
+            // on-screen if the monitor layout changed since last run
+            if (auto* settings = props.getUserSettings())
+            {
+                const auto state = settings->getValue("mainWindowState");
+                if (state.isNotEmpty())
+                    restoreWindowStateFromString(state);
+            }
+
             setVisible(true);
+            applyWindowIcon();
         }
 
         void closeButtonPressed() override
@@ -47,7 +85,48 @@ public:
             JUCEApplication::getInstance()->systemRequestedQuit();
         }
 
+        // Closing a component leaves JUCE with nothing focused, and keys then
+        // arrive at the window rather than bubbling up from a child. Quick Add
+        // is a window of its own, so that is exactly the state it leaves behind:
+        // without this, Enter could not put down the module it had just handed
+        // to the pointer, though a click could.
+        bool keyPressed(const juce::KeyPress& key) override
+        {
+            if (key == juce::KeyPress::escapeKey && PatchCanvas::isDropPending())
+            {
+                PatchCanvas::cancelPendingDrop();
+                return true;
+            }
+            if (key == juce::KeyPress::returnKey && PatchCanvas::dropPendingAtPointer())
+                return true;
+
+            return DocumentWindow::keyPressed(key);
+        }
+
     private:
+        void applyWindowIcon()
+        {
+            auto icon = juce::ImageFileFormat::loadFrom(BinaryData::appicon_png,
+                                                        BinaryData::appicon_pngSize);
+            if (!icon.isValid())
+                return;
+
+            constexpr int maxWindowIconSize = 256;
+            if (icon.getWidth() > maxWindowIconSize || icon.getHeight() > maxWindowIconSize)
+            {
+                const auto scale = static_cast<double>(maxWindowIconSize)
+                                 / static_cast<double>(juce::jmax(icon.getWidth(), icon.getHeight()));
+                icon = icon.rescaled(juce::roundToInt(icon.getWidth() * scale),
+                                     juce::roundToInt(icon.getHeight() * scale),
+                                     juce::Graphics::highResamplingQuality);
+            }
+
+            setIcon(icon);
+
+            if (auto* peer = getPeer())
+                peer->setIcon(icon);
+        }
+
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainWindow)
     };
 
@@ -56,4 +135,4 @@ private:
     std::unique_ptr<MainWindow> mainWindow;
 };
 
-START_JUCE_APPLICATION(NomadApplication)
+START_JUCE_APPLICATION(NmeApplication)

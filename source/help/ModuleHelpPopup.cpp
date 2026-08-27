@@ -1,4 +1,5 @@
 #include "ModuleHelpPopup.h"
+#include "../ui/AppTheme.h"
 #include <iostream>
 
 // ============================================================================
@@ -9,9 +10,10 @@ class HelpContent : public juce::Component
 public:
     explicit HelpContent(const NordHelp::ModuleHelp& help)
     {
-        // Module description
-        descLabel.setFont(juce::Font(juce::FontOptions(13.0f)));
-        descLabel.setColour(juce::Label::textColourId,       juce::Colour(0xffdddddd));
+        // Module description. Palette colour, not a hardcoded near-white: on a
+        // light theme white-on-white made the text invisible (issue #58).
+        descLabel.setFont(juce::Font(AppTheme::uiFont(13.0f)));
+        descLabel.setColour(juce::Label::textColourId,       AppTheme::palette().textPrimary);
         descLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
         descLabel.setText(help.description, juce::dontSendNotification);
         descLabel.setJustificationType(juce::Justification::topLeft);
@@ -20,17 +22,22 @@ public:
 
         for (auto& p : help.params)
         {
+            // "$Contents", "$#", "$Edit"...: navigation artifacts the help
+            // scraper dragged in from the original manual's section pages,
+            // not real controls (issue #57).
+            if (p.name.startsWith("$"))
+                continue;
             auto* nl = names.add(std::make_unique<juce::Label>());
-            nl->setFont(juce::Font(juce::FontOptions(12.0f)).boldened());
-            nl->setColour(juce::Label::textColourId,       juce::Colour(0xffffaa44));
+            nl->setFont(juce::Font(AppTheme::uiFont(12.0f)).boldened());
+            nl->setColour(juce::Label::textColourId,       AppTheme::palette().accentWarning);
             nl->setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
             nl->setText(p.name, juce::dontSendNotification);
             nl->setJustificationType(juce::Justification::topLeft);
             addAndMakeVisible(nl);
 
             auto* dl = descs.add(std::make_unique<juce::Label>());
-            dl->setFont(juce::Font(juce::FontOptions(12.0f)));
-            dl->setColour(juce::Label::textColourId,       juce::Colour(0xffcccccc));
+            dl->setFont(juce::Font(AppTheme::uiFont(12.0f)));
+            dl->setColour(juce::Label::textColourId,       AppTheme::palette().textSecondary);
             dl->setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
             dl->setText(p.description, juce::dontSendNotification);
             dl->setJustificationType(juce::Justification::topLeft);
@@ -76,12 +83,12 @@ public:
 
     void paint(juce::Graphics& g) override
     {
-        g.fillAll(juce::Colour(0xff1e1e2e));
+        g.fillAll(AppTheme::palette().backgroundPanel);
         if (!names.isEmpty())
         {
             // divider line just above first parameter
             int y = descLabel.getBottom() + 10 + 4;
-            g.setColour(juce::Colour(0xff333355));
+            g.setColour(AppTheme::palette().buttonActive);
             g.fillRect(12, y, getWidth() - 24, 1);
         }
     }
@@ -89,7 +96,7 @@ public:
 private:
     static int textHeight(const juce::String& text, int width, float fs, bool bold)
     {
-        auto f = juce::Font(juce::FontOptions(fs));
+        auto f = juce::Font(AppTheme::uiFont(fs));
         if (bold) f = f.boldened();
         // Use AttributedString + TextLayout for accurate multi-line height
         juce::AttributedString as;
@@ -115,16 +122,14 @@ ModuleHelpPopup::ModuleHelpPopup(const NordHelp::ModuleHelp& help,
     setOpaque(true);
 
     // Title bar
-    titleLabel.setFont(juce::Font(juce::FontOptions(14.0f)).boldened());
-    titleLabel.setColour(juce::Label::textColourId,       juce::Colour(0xffffcc44));
+    titleLabel.setFont(juce::Font(AppTheme::uiFont(14.0f)).boldened());
+    titleLabel.setColour(juce::Label::textColourId,       AppTheme::palette().accentActive);
     titleLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
     titleLabel.setText(help.name, juce::dontSendNotification);
     titleLabel.setJustificationType(juce::Justification::centredLeft);
+    titleLabel.setInterceptsMouseClicks(false, false);
     addAndMakeVisible(titleLabel);
 
-    closeButton.setButtonText("x");
-    closeButton.setColour(juce::TextButton::buttonColourId,   juce::Colours::transparentBlack);
-    closeButton.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xffaaaaaa));
     closeButton.onClick = [this]() { removeFromDesktop(); delete this; };
     addAndMakeVisible(closeButton);
 
@@ -132,7 +137,7 @@ ModuleHelpPopup::ModuleHelpPopup(const NordHelp::ModuleHelp& help,
     auto* content = new HelpContent(help);
     viewport.setViewedComponent(content, true);
     viewport.setScrollBarsShown(true, false);
-    viewport.setColour(juce::ScrollBar::thumbColourId, juce::Colour(0xff444466));
+    viewport.setColour(juce::ScrollBar::thumbColourId, AppTheme::palette().borderColor);
     addAndMakeVisible(viewport);
 
     // Size: lay out content at target width first
@@ -172,9 +177,9 @@ void ModuleHelpPopup::resized()
 
 void ModuleHelpPopup::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colour(0xff14142a));
+    g.fillAll(AppTheme::palette().backgroundPanel);
     // Title bar bottom line
-    g.setColour(juce::Colour(0xff333355));
+    g.setColour(AppTheme::palette().buttonActive);
     g.fillRect(0, 31, getWidth(), 1);
 }
 
@@ -191,7 +196,8 @@ bool ModuleHelpPopup::keyPressed(const juce::KeyPress& key)
 
 void ModuleHelpPopup::mouseDown(const juce::MouseEvent& e)
 {
-    dragger.startDraggingComponent(this, e);
+    if (e.getPosition().getY() < 32)
+        dragger.startDraggingComponent(this, e);
 }
 
 void ModuleHelpPopup::mouseDrag(const juce::MouseEvent& e)
@@ -203,12 +209,27 @@ void ModuleHelpPopup::mouseDrag(const juce::MouseEvent& e)
 ModuleHelpPopup* ModuleHelpPopup::show(const juce::String& moduleFullname,
                                        juce::Component* relativeTo)
 {
-    const NordHelp::ModuleHelp* help = NordHelp::findModuleHelp(moduleFullname);
+    // moduleFullname may be "FullName|ShortName" — try each part
+    auto parts = juce::StringArray::fromTokens(moduleFullname, "|", "");
+
+    const NordHelp::ModuleHelp* help = nullptr;
+    for (auto& part : parts)
+    {
+        help = NordHelp::findModuleHelp(part.trim());
+        if (help != nullptr) break;
+    }
+
+    // Fallback: strip parenthesised suffixes from each part
     if (help == nullptr)
     {
-        juce::String trimmed = moduleFullname.upToFirstOccurrenceOf("(", false, false).trim();
-        help = NordHelp::findModuleHelp(trimmed);
+        for (auto& part : parts)
+        {
+            juce::String trimmed = part.upToFirstOccurrenceOf("(", false, false).trim();
+            help = NordHelp::findModuleHelp(trimmed);
+            if (help != nullptr) break;
+        }
     }
+
     if (help == nullptr)
     {
         std::cout << "[HELP] No help found for: " << moduleFullname << std::endl;

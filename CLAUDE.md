@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Nomad2026 reimplements the Nomad editor for the Clavia Nord Modular G1 synthesizer, porting from Java (Swing/JPF) to JUCE/C++17. The original editor requires JDK 8 and is incompatible with Java 9+ due to JPF 1.5.1's classloader design.
+Animatek NME (Nord Modular Editor G1, formerly Nomad2026) reimplements the Nomad editor for the Clavia Nord Modular G1 synthesizer, porting from Java (Swing/JPF) to JUCE/C++17. The original editor requires JDK 8 and is incompatible with Java 9+ due to JPF 1.5.1's classloader design.
 
 ## Build Commands
 
@@ -16,13 +16,29 @@ cmake -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j$(nproc)
 
 # Run
-./build/Nomad2026_artefacts/Debug/Nomad2026
+./build/AnimatekNME_artefacts/Debug/AnimatekNME
 
 # Run original Java editor (for reference/comparison)
 cd nomad-0-3_2 && ../jdk8u482-b08/bin/java -jar nomad.jar
 ```
 
-No test framework is set up yet. No linter is configured.
+```bash
+# Run unit tests (pure layers: patch codec, SysEx, packetizer, placement)
+cmake --build build --target nme_tests && ctest --test-dir build --output-on-failure
+
+# Before pushing: the same tests under the sanitizers. The plain build says
+# nothing about undefined behaviour, and CI runs this job.
+cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+cmake --build build-asan --target nme_tests -j$(nproc)
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+  ctest --test-dir build-asan --output-on-failure
+```
+
+Tests live in `tests/` (doctest, vendored at `libs/doctest/`); CI runs them on
+every push (`.github/workflows/ci.yml`), plain and under ASan/UBSan. No linter
+is configured.
 
 ## Architecture
 
@@ -31,11 +47,24 @@ The JUCE app is minimal scaffolding so far:
 - `source/MainComponent.cpp` — Root UI component (currently just a splash)
 - `CMakeLists.txt` — JUCE is included as a subdirectory, app links against juce_core, juce_gui_basics, juce_gui_extra, juce_audio_basics, juce_audio_devices
 
-JUCE lives at `JUCE/` as a local copy (not a submodule).
+JUCE lives at `JUCE/` as a git submodule (juce-framework/JUCE, 8.x). CI checks it out
+with `submodules: recursive`; locally run `git submodule update --init` after a fresh clone.
+`.github/workflows/build-binaries.yml` (manual `workflow_dispatch`) builds Release
+binaries for Linux/Windows/macOS-universal as short-lived artifacts — binaries are
+distributed via Patreon, never as public GitHub Releases. Release binaries are normally
+built locally (`VERSION=x.y.z bash packaging/build-appimage.sh`) and dropped into
+`#Ejecutables/<version>/`.
+
+## Documentation Layout
+
+- `manual/` — user manual (chapters + `07-shortcuts.md`, keep in sync with the in-app shortcuts dialog)
+- `docs/` — project docs: STATUS, ROADMAP, MODULE_CHECKLIST, RELEASE_CHECKLIST, PLUGIN_ARCHITECTURE, RESEARCH, MDI_PLAN
+- `docs/releases/` — per-version release notes (`RELEASE_NOTES_x.y.z.md`)
+- Root keeps only README.md, CHANGELOG.md, CLAUDE.md/AGENTS.md, LICENSE
 
 ## Reference Material
 
-All reverse-engineering docs live in `RESEARCH.md` — protocol spec, patch format, module system, PDL2 grammar, and architecture of the original editor. This is the primary reference for implementation work.
+All reverse-engineering docs live in `docs/RESEARCH.md` — protocol spec, patch format, module system, PDL2 grammar, and architecture of the original editor. This is the primary reference for implementation work.
 
 ### Key data sources (gitignored, present locally)
 | Path | Content |

@@ -1,11 +1,12 @@
 #include "ColorScheme.h"
+#include "AppTheme.h"
 
 static ColorScheme makeClassicTheme()
 {
     ColorScheme s;
     // Canvas
-    s.gridBackground  = juce::Colour(0xff12122a);
-    s.gridLines       = juce::Colour(0xff1a1a3a);
+    s.gridBackground  = juce::Colour(0xff1f2125);
+    s.gridLines       = juce::Colour(0xff2a2d33);
     // Module panels
     s.moduleBorder    = juce::Colour(0x44000000);
     s.moduleText      = juce::Colours::black.withAlpha(0.7f);
@@ -26,9 +27,9 @@ static ColorScheme makeClassicTheme()
     s.connHole        = juce::Colour(0xff111111);
     s.connOutline     = juce::Colour(0xff222222);
     // Text displays
-    s.displayBg       = juce::Colour(0xff2A2560);
-    s.displayBorder   = juce::Colour(0xff181440);
-    s.displayText     = juce::Colour(0xff4A3FA0);
+    s.displayBg       = AppTheme::palette().inputBackground;
+    s.displayBorder   = AppTheme::palette().borderColor;
+    s.displayText     = AppTheme::palette().textPrimary;
     // Buttons
     s.buttonText       = juce::Colour(0xff333333);
     s.buttonTextActive = juce::Colour(0xff111111);
@@ -38,7 +39,7 @@ static ColorScheme makeClassicTheme()
     s.resetBorder      = juce::Colour(0xff444444);
     s.resetText        = juce::Colour(0xffaaaaaa);
     // Reset dot
-    s.resetDotOn       = juce::Colour(0xff44cc44);
+    s.resetDotOn       = AppTheme::palette().accentSuccess;
     s.resetDotOff      = juce::Colour(0xff2a4a2a);
     // Cable signal colors
     s.cableAudio       = juce::Colour(0xffCB4F4F);
@@ -58,9 +59,9 @@ static ColorScheme makeClassicTheme()
     s.meterTrack       = juce::Colour(0xff555555);
     s.meterBg          = juce::Colour(0xff222222);
     // Custom displays
-    s.displayBgCustom     = juce::Colour(0xff1a1a2e);
-    s.displayBorderCustom = juce::Colour(0xff444466);
-    s.displayGrid         = juce::Colour(0xff333355);
+    s.displayBgCustom     = AppTheme::palette().inputBackground;
+    s.displayBorderCustom = AppTheme::palette().borderColor;
+    s.displayGrid         = AppTheme::palette().buttonActive;
     s.displayCurveGreen   = juce::Colour(0xff55cc55);
     s.displayCurveBlue    = juce::Colour(0xff55aaff);
     s.displayCurveWarm    = juce::Colour(0xffff8844);
@@ -79,7 +80,7 @@ static ColorScheme makeClassicTheme()
     // Increment buttons
     s.incrementBg         = juce::Colour(0xff3a3a3a);
     s.incrementBorder     = juce::Colour(0xff555555);
-    s.incrementFg         = juce::Colour(0xffcccccc);
+    s.incrementFg         = AppTheme::palette().textSecondary;
     // Mute
     s.muteActive          = juce::Colour(0xffcc4444);
     // Vocoder
@@ -88,7 +89,7 @@ static ColorScheme makeClassicTheme()
     s.bracketRouting      = juce::Colour(0xff888888);
     // SlotBar
     s.slotIconActive      = juce::Colour(0xffcc3333);
-    s.slotIconInactive    = juce::Colour(0xff555577);
+    s.slotIconInactive    = AppTheme::palette().borderColor;
     return s;
 }
 
@@ -97,7 +98,7 @@ static ColorScheme makeDarkTheme()
     ColorScheme s;
     // Canvas
     s.gridBackground  = juce::Colour(0xff111111);
-    s.gridLines       = juce::Colour(0xff1c1c2a);
+    s.gridLines       = juce::Colour(0xff2a2d33);
     // Module panels
     s.moduleBorder    = juce::Colour(0x44000000);
     s.moduleText      = juce::Colours::white.withAlpha(0.85f);
@@ -130,7 +131,7 @@ static ColorScheme makeDarkTheme()
     s.resetBorder      = juce::Colour(0xff444444);
     s.resetText        = juce::Colour(0xffaaaaaa);
     // Reset dot
-    s.resetDotOn       = juce::Colour(0xff44cc44);
+    s.resetDotOn       = AppTheme::palette().accentSuccess;
     s.resetDotOff      = juce::Colour(0xff1a2a22);
     // Cable signal colors (identical to Classic)
     s.cableAudio       = juce::Colour(0xffCB4F4F);
@@ -150,9 +151,9 @@ static ColorScheme makeDarkTheme()
     s.meterTrack       = juce::Colour(0xff3a3a3a);
     s.meterBg          = juce::Colour(0xff1a1a1a);
     // Custom displays
-    s.displayBgCustom     = juce::Colour(0xff1a1a2e);
-    s.displayBorderCustom = juce::Colour(0xff444466);
-    s.displayGrid         = juce::Colour(0xff333355);
+    s.displayBgCustom     = AppTheme::palette().inputBackground;
+    s.displayBorderCustom = AppTheme::palette().borderColor;
+    s.displayGrid         = AppTheme::palette().buttonActive;
     s.displayCurveGreen   = juce::Colour(0xff2DDCA3);
     s.displayCurveBlue    = juce::Colour(0xff55aaff);
     s.displayCurveWarm    = juce::Colour(0xffff8844);
@@ -164,14 +165,14 @@ static ColorScheme makeDarkTheme()
     s.iconFg              = juce::Colours::white;
     // Snap / selection
     s.snapHighlight       = juce::Colour(0xffE5DE45);
-    s.selectionRect       = juce::Colour(0xff4444ff);
+    s.selectionRect       = juce::Colour(0xffD4A020);
     s.selectionFill       = juce::Colour(0x22ffffff);
     // Connector lines
     s.connectorLine       = juce::Colour(0xff2a2a2a);
     // Increment buttons
     s.incrementBg         = juce::Colour(0xff2a2a2a);
     s.incrementBorder     = juce::Colour(0xff55585C);
-    s.incrementFg         = juce::Colour(0xffcccccc);
+    s.incrementFg         = AppTheme::palette().textSecondary;
     // Mute
     s.muteActive          = juce::Colour(0xffcc4444);
     // Vocoder
@@ -180,9 +181,23 @@ static ColorScheme makeDarkTheme()
     s.bracketRouting      = juce::Colour(0xff888888);
     // SlotBar
     s.slotIconActive      = juce::Colour(0xffcc3333);
-    s.slotIconInactive    = juce::Colour(0xff555577);
+    s.slotIconInactive    = AppTheme::palette().borderColor;
     return s;
 }
 
 const ColorScheme kClassicTheme = makeClassicTheme();
 const ColorScheme kDarkTheme    = makeDarkTheme();
+
+ColorScheme createClassicTheme()
+{
+    auto s = makeClassicTheme();
+    s.canvasTexture = true;   // subtle canvas grain on every theme
+    return s;
+}
+
+ColorScheme createDarkTheme()
+{
+    auto s = makeDarkTheme();
+    s.canvasTexture = true;   // subtle canvas grain on every theme (base for makeCanvas)
+    return s;
+}

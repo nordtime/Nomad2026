@@ -94,7 +94,7 @@ void ThemeData::parseModule(const juce::XmlElement& moduleElem)
                                             .upToLastOccurrenceOf(".", false, false);
                 bool canDraw = iconName.startsWith("wf_")
                             || (iconName.startsWith("decoration-") && !iconName.contains("."))
-                            || iconName == "ds-2-7" || iconName == "ds-2-8";
+                            || iconName.startsWith("ds-2-");
                 if (canDraw)
                 {
                     ThemeStaticIcon si;
@@ -104,12 +104,34 @@ void ThemeData::parseModule(const juce::XmlElement& moduleElem)
                     int sizeAttr = child->getIntAttribute("size", 0);
                     si.width  = child->getIntAttribute("width",  sizeAttr > 0 ? sizeAttr : 11);
                     si.height = child->getIntAttribute("height", sizeAttr > 0 ? sizeAttr : 9);
+                    // width="-1" / height="-1" means "use natural PNG size"
+                    if (si.width <= 0 || si.height <= 0)
+                    {
+                        struct NS { const char* name; int w, h; };
+                        static const NS natural[] = {
+                            {"decoration-1",  68, 16}, {"decoration-2",  91, 18},
+                            {"decoration-5",  25, 11}, {"decoration-6",  25, 11},
+                            {"decoration-7",  35, 16}, {"decoration-8",  59, 13},
+                            {"decoration-9",  68, 13}, {"decoration-10", 50, 14},
+                            {"decoration-11", 65, 16}, {"decoration-12", 64, 16},
+                            {"decoration-13", 25, 19}, {"decoration-14", 68, 11},
+                            {"decoration-15", 20, 14}, {"decoration-17", 18, 10},
+                            {"decoration-18", 17, 19},
+                            {"decoration-3",  25, 22},
+                            {"ds-2-1", 16, 16}, {"ds-2-2", 16, 16},
+                            {"ds-2-3", 16, 16}, {"ds-2-4", 16, 16},
+                            {"ds-2-5", 16, 16}, {"ds-2-6", 16, 16},
+                            {"ds-2-7", 16, 16}, {"ds-2-8", 16, 16}
+                        };
+                        for (auto& n : natural)
+                            if (iconName == n.name) { if (si.width <= 0) si.width = n.w; if (si.height <= 0) si.height = n.h; }
+                    }
                     theme.staticIcons.push_back(si);
                 }
             }
         }
         else if (tag != "name"
-                 && tag != "scrollbar" && tag != "defs" && tag != "style"
+                 && tag != "defs" && tag != "style"
                  && child->hasAttribute("x") && child->hasAttribute("width"))
         {
             // Custom display element (overdrive-display, LFODisplay, etc.)
@@ -170,6 +192,30 @@ void ThemeData::parseModule(const juce::XmlElement& moduleElem)
                     cd.slopeComponentId = sub->getStringAttribute("component-id");
                 else if (subTag == "gain-control")
                     cd.gainControlComponentId = sub->getStringAttribute("component-id");
+                else if (subTag == "overdrive")
+                    cd.overdriveComponentId = sub->getStringAttribute("component-id");
+                else if (subTag == "clip")
+                    cd.clipComponentId = sub->getStringAttribute("component-id");
+                else if (subTag == "symmetry")
+                    cd.symmetryComponentId = sub->getStringAttribute("component-id");
+                else if (subTag == "wavewrap")
+                    cd.wavewrapComponentId = sub->getStringAttribute("component-id");
+                else if (subTag == "threshold")
+                    cd.thresholdComponentId = sub->getStringAttribute("component-id");
+                else if (subTag == "ratio")
+                    cd.ratioComponentId = sub->getStringAttribute("component-id");
+                else if (subTag == "ref-level")
+                    cd.refLevelComponentId = sub->getStringAttribute("component-id");
+                else if (subTag == "limiter")
+                    cd.limiterComponentId = sub->getStringAttribute("component-id");
+                else if (subTag == "gate")
+                    cd.gateComponentId = sub->getStringAttribute("component-id");
+                else if (subTag == "feedback")
+                    cd.feedbackComponentId = sub->getStringAttribute("component-id");
+                else if (subTag == "peaks")
+                    cd.peaksComponentId = sub->getStringAttribute("component-id");
+                else if (subTag == "spread")
+                    cd.spreadComponentId = sub->getStringAttribute("component-id");
                 else if (subTag == "in-pos")
                 {
                     cd.mmInX = sub->getIntAttribute("x");
@@ -188,10 +234,16 @@ void ThemeData::parseModule(const juce::XmlElement& moduleElem)
                     if (idx >= 0 && idx < 16)
                         cd.bandIds[idx] = sub->getStringAttribute("component-id");
                 }
+                else if (subTag.startsWith("step") && subTag.length() <= 6)
+                {
+                    int idx = subTag.substring(4).getIntValue();
+                    if (idx >= 0 && idx < 16)
+                        cd.noteStepIds[idx] = sub->getStringAttribute("component-id");
+                }
             }
             theme.customDisplays.push_back(cd);
         }
-        // Silently skip: image, scrollbar
+        // Silently skip: image
     }
 
     themes[theme.componentId] = std::move(theme);
@@ -242,6 +294,26 @@ void ThemeData::parseSlider(const juce::XmlElement& elem, ModuleTheme& theme)
     theme.sliders.push_back(ts);
 }
 
+// A polarity switch: two states, bipolar when the button is out and unipolar
+// when it is in. The inherited theme XML labels *both* states "Uni" on every
+// module that has one (Constant, LevMult, LevAdd, CtrlSeq), so the panel reads
+// the same whichever way the switch is set and the only clue is the bevel. Name
+// the states instead, from one place: keyed off the parameter the button drives
+// rather than a list of module IDs, so a polarity switch that turns up in a
+// later module or a hand-edited theme is labelled without touching this code
+// or repeating the pair of strings in the XML (issue #69).
+namespace
+{
+bool isPolarityParam(const juce::String& paramAlt)
+{
+    return paramAlt.equalsIgnoreCase("uni") || paramAlt.equalsIgnoreCase("unipolar");
+}
+
+// Index is the parameter value: 0 = off = bipolar, 1 = on = unipolar, which is
+// what the hardware does ("in bipolar mode, button not depressed").
+const std::vector<juce::String> kPolarityLabels { "Bip", "Uni" };
+}
+
 void ThemeData::parseButton(const juce::XmlElement& elem, ModuleTheme& theme)
 {
     ThemeButton tb;
@@ -254,10 +326,15 @@ void ThemeData::parseButton(const juce::XmlElement& elem, ModuleTheme& theme)
     tb.landscape = (elem.getStringAttribute("landscape") == "true");
     tb.reversed = (elem.getStringAttribute("reverse") == "true");
 
+    juce::String paramAlt;
     if (auto* param = elem.getChildByName("parameter"))
+    {
         tb.componentId = param->getStringAttribute("component-id");
+        paramAlt       = param->getStringAttribute("alt");
+    }
 
     // Collect button labels indexed by btn index
+    std::vector<juce::String> docLabels, docImageRefs;
     for (auto* btn = elem.getFirstChildElement(); btn != nullptr;
          btn = btn->getNextElement())
     {
@@ -285,7 +362,29 @@ void ThemeData::parseButton(const juce::XmlElement& elem, ModuleTheme& theme)
             while (static_cast<int>(tb.imageRefs.size()) <= idx)
                 tb.imageRefs.push_back("");
             tb.imageRefs[static_cast<size_t>(idx)] = imageRef;
+
+            docLabels.push_back(text);
+            docImageRefs.push_back(imageRef);
         }
+    }
+
+    // Reversed vertical selectors are written top-to-bottom in document order,
+    // and some blocks (LFOA/LFOB) number their btn indices the other way round
+    // from the parameter value. Document order is the only consistent signal,
+    // so re-key the labels by value: the first <btn> is the highest value.
+    if (tb.reversed && docLabels.size() > 1)
+    {
+        tb.labels.assign(docLabels.rbegin(), docLabels.rend());
+        tb.imageRefs.assign(docImageRefs.rbegin(), docImageRefs.rend());
+    }
+
+    // Polarity switches say which polarity they are in, whatever the XML labels
+    // them (see isPolarityParam above). Increment and radio blocks are left
+    // alone: this is only about the one-button toggle.
+    if (tb.cyclic && !tb.isIncrement && isPolarityParam(paramAlt))
+    {
+        tb.labels = kPolarityLabels;
+        tb.imageRefs.clear();   // the labels are the whole button
     }
 
     // Detect <call component="..." method="rnd"> (Vocoder Rnd button)
@@ -296,6 +395,17 @@ void ThemeData::parseButton(const juce::XmlElement& elem, ModuleTheme& theme)
         tb.callValue  = call->getIntAttribute("value", 0);
     }
 
+    // Multi-Env (m52) p10 sustain: original Nomad UI renders this as a small
+    // display with up/down arrows rather than a cyclic button. Values are
+    // "--", "L1", "L2", "L3", "L4". Convert to increment layout + custom labels.
+    if (theme.componentId == "m52" && tb.componentId == "p10")
+    {
+        tb.isIncrement = true;
+        tb.cyclic      = false;
+        tb.landscape   = false;
+        tb.labels = { "--", "L1", "L2", "L3", "L4" };
+    }
+
     theme.buttons.push_back(tb);
 }
 
@@ -304,6 +414,9 @@ void ThemeData::parseLabel(const juce::XmlElement& elem, ModuleTheme& theme)
     ThemeLabel tl;
     tl.x = elem.getIntAttribute("x");
     tl.y = elem.getIntAttribute("y");
+    tl.width = elem.getIntAttribute("width", tl.width);
+    tl.height = elem.getIntAttribute("height", tl.height);
+    tl.centred = (elem.getStringAttribute("align") == "centre");
     tl.text = elem.getAllSubText().trim().replace("\\n", "\n");
 
     theme.labels.push_back(tl);
@@ -321,127 +434,63 @@ void ThemeData::parseTextDisplay(const juce::XmlElement& elem, ModuleTheme& them
     {
         td.componentId = param->getStringAttribute("component-id");
 
-        // Modules with note-select parameter (MIDI note name display)
-        // m67 (NoteDetect): p1 — m100 (KeybSplit): p1 (lower) and p2 (upper)
-        static const juce::StringArray noteSelectModules { "m67", "m100" };
-        bool isNoteModule = noteSelectModules.contains(theme.componentId);
-        bool isNoteParam  = (td.componentId == "p1") ||
-                            (theme.componentId == "m100" && td.componentId == "p2");
-        if (isNoteModule && isNoteParam)
-            td.noteFormat = true;
+        // Partial-ratio override: these modules use "value-64" / "fmtLFOHz" /
+        // "fmtSemitones" in modules.xml but the original Nomad UI shows them
+        // as partial ratios (1:1, 2:1...).
+        //   m10-m14,m85  slave oscillator detune coarse (p2)
+        //   m27-m30,m80  LFO slaves rate (p2)
+        //   m34,m110     Random generator rate (p2)
+        //   m106         OscSineBank per-osc coarse tune (p1/p4/p7/p10/p13/p16)
+        //
+        // Only some of them carry arrow steppers. The original gives the slave
+        // oscillators a "Partials" row and the sine bank a spinner; the LFO
+        // slaves and the two random generators have none, and drawing them
+        // there put the arrows through LFOSlvA's Mono button and over the
+        // bottom edge of LFOSlvC and LFOSlvE (issue #48). Every one of these
+        // has a knob on the same parameter, so nothing loses its control.
+        const auto& mod = theme.componentId;
+        const auto& pid = td.componentId;
 
-        // Oscillator frequency displays — show note name (C-1..G9) instead of raw number
-        // Main oscillators: m7 (OscA), m8 (OscB), m9 (OscC) — p2 = freq coarse
-        static const juce::StringArray oscNoteModules { "m7", "m8", "m9" };
-        if (oscNoteModules.contains(theme.componentId) && td.componentId == "p2")
-            td.noteFormat = true;
-
-        // Advanced oscillators: Hz display (440*2^((v-69)/12))
-        // m95=PercOsc, m96=FormantOsc, m97=MasterOsc, m107=SpectralOsc
-        static const juce::StringArray oscHzModules { "m95", "m96", "m97", "m107" };
-        if (oscHzModules.contains(theme.componentId) && td.componentId == "p2")
-            td.oscHzFormat = true;
-
-        // OscSineBank (m106): tune knobs → partial ratio (1:1, 2:1, etc.)
         static const juce::StringArray oscSineBankFreqParams { "p1","p4","p7","p10","p13","p16" };
-        if (theme.componentId == "m106" && oscSineBankFreqParams.contains(td.componentId))
-            td.partialFormat = true;
-
-        // Slave oscillator detune coarse → partial ratio
-        static const juce::StringArray slaveOscModules { "m10", "m11", "m12", "m13", "m14", "m85" };
-        if (slaveOscModules.contains(theme.componentId) && td.componentId == "p2")
-            td.partialFormat = true;
-
-        // LFO slave rate → partial ratio (m80=LFOSlvA, m27=B, m28=C, m29=D, m30=E)
-        static const juce::StringArray lfoSlvModules { "m80", "m27", "m28", "m29", "m30" };
-        if (lfoSlvModules.contains(theme.componentId) && td.componentId == "p2")
-            td.partialFormat = true;
-
-        // Random generators rate → partial ratio (m34=RndStepGen, m110=RandomGen)
-        static const juce::StringArray rndGenModules { "m34", "m110" };
-        if (rndGenModules.contains(theme.componentId) && td.componentId == "p2")
-            td.partialFormat = true;
-
-        // LFO rate → fmtLFOHz (440*2^((v-177)/12), shows s or Hz)
-        // m24=LFOA, m25=LFOB, m26=LFOC
-        static const juce::StringArray lfoModules { "m24", "m25", "m26" };
-        if (lfoModules.contains(theme.componentId) && td.componentId == "p1")
-            td.lfoHzFormat = true;
-
-        // Phase display → fmtPhase: v*2.8125-180 degrees
-        // m24=LFOA p7, m25=LFOB p3, m80=LFOSlvA p3
-        bool isPhaseParam = (theme.componentId == "m24" && td.componentId == "p7") ||
-                            (theme.componentId == "m25" && td.componentId == "p3") ||
-                            (theme.componentId == "m80" && td.componentId == "p3");
-        if (isPhaseParam)
-            td.phaseFormat = true;
-
-        // BPM display → fmtBPM (ClkGen m68 p1)
-        if (theme.componentId == "m68" && td.componentId == "p1")
-            td.bpmFormat = true;
-
-        // DrumSynth (m58): MTune → fmtDrumHz, STune → fmtDrumPartials
-        if (theme.componentId == "m58")
+        const bool sineBank    = (mod == "m106" && oscSineBankFreqParams.contains(pid));
+        const bool slaveOsc    = (pid == "p2" && (mod == "m10" || mod == "m11" || mod == "m12" ||
+                                                  mod == "m13" || mod == "m14" || mod == "m85"));
+        const bool noArrows    = (pid == "p2" && (mod == "m27" || mod == "m28" || mod == "m29" ||
+                                                  mod == "m30" || mod == "m80" ||
+                                                  mod == "m34" || mod == "m110"));
+        if (sineBank || slaveOsc || noArrows)
         {
-            if (td.componentId == "p1") td.drumHzFormat = true;
-            if (td.componentId == "p2") td.drumPartialFormat = true;
+            td.partialFormat     = true;
+            td.partialArrows     = sineBank || slaveOsc;
+            td.formatterOverride = "fmtPartials";
         }
 
-        // PatternGen (m99): step p4 → 0=OFF, 1-128=number
-        if (theme.componentId == "m99" && td.componentId == "p4")
-            td.stepFormat = true;
+        // Amplifier (m81) p1 gain: shows "x1.00" factor, fmtAmpGain is orphan
+        // in nmformat.js (not referenced from modules.xml) but the Java editor
+        // applies it here.
+        if (mod == "m81" && pid == "p1")
+            td.formatterOverride = "fmtAmpGain";
 
-        // fmtAdsrTime: m20(ADSR), m23(Mod-Env), m46(AHD), m52(Multi-Env), m84(AD-Env)
-        {
-            static const std::map<juce::String, juce::StringArray> adsrTimeMap {
-                { "m20", { "p2", "p3", "p5" } },
-                { "m23", { "p1", "p2", "p4" } },
-                { "m46", { "p1", "p2", "p3" } },
-                { "m52", { "p5", "p6", "p7", "p8", "p9" } },
-                { "m84", { "p1", "p2" } }
-            };
-            auto it = adsrTimeMap.find(theme.componentId);
-            if (it != adsrTimeMap.end() && it->second.contains(td.componentId))
-                td.adsrTimeFormat = true;
-        }
+        // LevMult (m111) p1 multiplier: bipolar -127..+127, centre 0 at v=64.
+        // LevAdd  (m112) p1 offset:     bipolar  -64..+64,  centre 0 at v=64.
+        if (mod == "m111" && pid == "p1") td.formatterOverride = "fmtLevMult";
+        if (mod == "m112" && pid == "p1") td.formatterOverride = "fmtLevAdd";
 
-        // fmtEnvelopeAttack / fmtEnvelopeRelease: m71 (EnvFollower)
-        if (theme.componentId == "m71")
-        {
-            if (td.componentId == "p1") td.envAttackFormat  = true;
-            if (td.componentId == "p2") td.envReleaseFormat = true;
-        }
+        // Pitch displays show frequency (Hz/kHz) instead of raw int / note name.
+        // Originals had a "freq display units" toggle (custom p1) that we don't
+        // expose yet; SpectralOsc already uses fmtOscHz directly in modules.xml.
+        //   m97 MasterOsc p2:  raw int   → fmtOscHz
+        //   m96 FormantOsc p2: raw int   → fmtOscHz
+        //   m7  OscA p2:       fmtNote   → fmtOscHz
+        //   m8  OscB p2:       fmtNote   → fmtOscHz
+        if ((mod == "m97" || mod == "m96" || mod == "m7" || mod == "m8") && pid == "p2")
+            td.formatterOverride = "fmtOscHz";
 
-        // fmtFilterHz1: 504*2^((v-64)/12) — FilterA (m86/p1), FilterB (m87/p1)
-        static const juce::StringArray filterHz1Modules { "m86", "m87" };
-        if (filterHz1Modules.contains(theme.componentId) && td.componentId == "p1")
-            td.filterHz1Format = true;
-
-        // fmtFilterHz2: 330*2^((v-60)/12) — FilterC(m50/p2), FilterD(m49/p2),
-        //                                     FilterE(m51/p5), FilterF(m92/p2)
-        if ((theme.componentId == "m50" && td.componentId == "p2") ||
-            (theme.componentId == "m49" && td.componentId == "p2") ||
-            (theme.componentId == "m51" && td.componentId == "p5") ||
-            (theme.componentId == "m92" && td.componentId == "p2"))
-            td.filterHz2Format = true;
-
-        // fmtEqHz: 471*2^((v-60)/12) — EqMid (m103/p1), EqShelving (m104/p1)
-        static const juce::StringArray eqModules { "m103", "m104" };
-        if (eqModules.contains(theme.componentId) && td.componentId == "p1")
-            td.eqHzFormat = true;
-
-        // EqGain: (v-64)*0.28125 dB — EqMid (m103/p2), EqShelving (m104/p2)
-        if (eqModules.contains(theme.componentId) && td.componentId == "p2")
-            td.eqGainFormat = true;
-
-        // EqBandwidth: v/75.0 Oct — EqMid only (m103/p3)
-        if (theme.componentId == "m103" && td.componentId == "p3")
-            td.eqBwFormat = true;
-
-        // Vowels: VocalFilter (m45) p1=left, p2=middle, p3=right
-        static const juce::StringArray vowelParams { "p1", "p2", "p3" };
-        if (theme.componentId == "m45" && vowelParams.contains(td.componentId))
-            td.vowelFormat = true;
+        // FilterA (m86) / FilterB (m87) p1 frequency: raw int → Hz/kHz.
+        // FilterC already uses fmtFilterHz2 in modules.xml; A/B are 6dB filters
+        // with the same coefficient layout as fmtFilterHz1 (504Hz centre).
+        if ((mod == "m86" || mod == "m87") && pid == "p1")
+            td.formatterOverride = "fmtFilterHz1";
     }
 
     theme.textDisplays.push_back(td);

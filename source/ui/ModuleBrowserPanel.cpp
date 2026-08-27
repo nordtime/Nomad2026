@@ -1,4 +1,5 @@
 #include "ModuleBrowserPanel.h"
+#include "AppTheme.h"
 
 // --- CategoryItem ---
 
@@ -12,8 +13,8 @@ ModuleBrowserPanel::CategoryItem::CategoryItem(const juce::String& categoryName,
 
 void ModuleBrowserPanel::CategoryItem::paintItem(juce::Graphics& g, int width, int height)
 {
-    g.setColour(juce::Colour(0xffdddddd));
-    g.setFont(juce::Font(juce::FontOptions(14.0f).withStyle("Bold")));
+    g.setColour(AppTheme::palette().textPrimary);
+    g.setFont(juce::Font(AppTheme::uiFont(14.0f).withStyle("Bold")));
     g.drawText(name, 4, 0, width - 4, height, juce::Justification::centredLeft);
 }
 
@@ -25,16 +26,16 @@ ModuleBrowserPanel::ModuleItem::ModuleItem(const ModuleDescriptor* desc)
 void ModuleBrowserPanel::ModuleItem::paintItem(juce::Graphics& g, int width, int height)
 {
     // Module name
-    g.setColour(juce::Colour(0xffcccccc));
-    g.setFont(juce::Font(juce::FontOptions(13.0f)));
+    g.setColour(AppTheme::palette().textSecondary);
+    g.setFont(juce::Font(AppTheme::uiFont(13.0f)));
     g.drawText(descriptor->fullname, 4, 0, width - 80, height, juce::Justification::centredLeft);
 
-    // Cycles cost on the right
+    // DSP cost on the right, formatted as the original editor prints it
     if (descriptor->cycles > 0)
     {
-        g.setColour(juce::Colour(0xff888888));
-        g.setFont(juce::Font(juce::FontOptions(11.0f)));
-        g.drawText(juce::String(descriptor->cycles, 1), width - 70, 0, 66, height,
+        g.setColour(AppTheme::palette().textMuted);
+        g.setFont(juce::Font(AppTheme::uiFont(11.0f)));
+        g.drawText(formatDspCost(descriptor->cycles), width - 70, 0, 66, height,
                    juce::Justification::centredRight);
     }
 }
@@ -53,16 +54,23 @@ juce::var ModuleBrowserPanel::ModuleItem::getDragSourceDescription()
 
 // --- ModuleBrowserPanel ---
 
+ModuleBrowserPanel::~ModuleBrowserPanel()
+{
+    // See the header: the tree outlives its root item, and ~TreeView writes to
+    // the root it is still holding. Hand it a null root first.
+    treeView.setRootItem(nullptr);
+}
+
 ModuleBrowserPanel::ModuleBrowserPanel()
 {
     filterField.setTextToShowWhenEmpty("Filter modules...", juce::Colour(0xff666666));
-    filterField.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff2a2a4a));
+    filterField.setColour(juce::TextEditor::backgroundColourId, AppTheme::palette().inputBackground);
     filterField.setColour(juce::TextEditor::textColourId, juce::Colours::white);
-    filterField.setColour(juce::TextEditor::outlineColourId, juce::Colour(0xff333355));
+    filterField.setColour(juce::TextEditor::outlineColourId, AppTheme::palette().buttonActive);
     filterField.onTextChange = [this] { applyFilter(); };
     addAndMakeVisible(filterField);
 
-    treeView.setColour(juce::TreeView::backgroundColourId, juce::Colour(0xff1e1e3a));
+    treeView.setColour(juce::TreeView::backgroundColourId, AppTheme::palette().backgroundPanel);
     treeView.setDefaultOpenness(false);
     addAndMakeVisible(treeView);
 }
@@ -75,7 +83,7 @@ void ModuleBrowserPanel::setModuleDescriptions(ModuleDescriptions* descriptions)
 
 void ModuleBrowserPanel::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colour(0xff1e1e3a));
+    g.fillAll(AppTheme::palette().backgroundPanel);
 }
 
 void ModuleBrowserPanel::resized()
@@ -130,7 +138,8 @@ void ModuleBrowserPanel::applyFilter()
                 [&filterText](const ModuleDescriptor* d)
                 {
                     return !d->name.toLowerCase().contains(filterText)
-                        && !d->fullname.toLowerCase().contains(filterText);
+                        && !d->fullname.toLowerCase().contains(filterText)
+                        && !d->tags.contains(filterText);
                 }),
                 mods.end());
         }

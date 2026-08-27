@@ -45,6 +45,7 @@ struct ModuleDescriptor
     juce::String fullname;
     juce::String category;
     juce::String componentId;
+    juce::String tags;        // lowercase search synonyms (see ModuleTags.cpp)
     int index = 0;
     double cycles = 0;
     double progMem = 0;
@@ -60,3 +61,17 @@ struct ModuleDescriptor
     std::vector<ConnectorDescriptor> connectors;
     std::vector<LightDescriptor> lights;
 };
+
+// A module's `cycles` is its share of the G1's DSP budget, in percent. The
+// original Clavia editor prints that share with two significant figures next to
+// every module name ("Audio In (2.2%)", "Drum Synthesizer (12%)"), so match its
+// rounding exactly: a patch optimised against the hardware editor must read the
+// same per-module numbers here (issue #31).
+inline juce::String formatDspCost(double cycles)
+{
+    // juce::String(double, numDecimalPlaces) only honours the digit count when
+    // it is > 0, so the two-figure integer case has to round by hand.
+    if (cycles >= 10.0)
+        return juce::String(juce::roundToInt(cycles)) + "%";
+    return juce::String(cycles, 1) + "%";
+}

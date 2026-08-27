@@ -1,65 +1,76 @@
 #include "PatchBrowserPanel.h"
+#include "AppTheme.h"
 #include <iostream>
 
-namespace
+PatchBrowserPanel::~PatchBrowserPanel()
 {
-juce::File getDefaultSnippetDirectory()
-{
-    auto dir = juce::File::getCurrentWorkingDirectory().getChildFile("snippets");
-    if (!dir.exists())
-        dir.createDirectory();
-    return dir;
-}
+    // See the header: the tree outlives its root item, and ~TreeView writes to
+    // the root it is still holding. Hand it a null root first.
+    if (treeView != nullptr)
+        treeView->setRootItem(nullptr);
 }
 
 PatchBrowserPanel::PatchBrowserPanel()
 {
     // Status label for loading state
     statusLabel.setJustificationType(juce::Justification::centred);
-    statusLabel.setColour(juce::Label::textColourId, juce::Colour(0xff888888));
-    statusLabel.setFont(juce::Font(juce::FontOptions(14.0f)));
+    statusLabel.setFont(juce::Font(AppTheme::uiFont(14.0f)));
     addAndMakeVisible(statusLabel);
 
     // Search label
     searchLabel.setText("Search:", juce::dontSendNotification);
-    searchLabel.setColour(juce::Label::textColourId, juce::Colour(0xffcccccc));
-    searchLabel.setFont(juce::Font(juce::FontOptions(12.0f)));
+    searchLabel.setFont(juce::Font(AppTheme::uiFont(12.0f)));
     addAndMakeVisible(searchLabel);
 
     // Search box
-    searchBox.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff2a2a4a));
-    searchBox.setColour(juce::TextEditor::textColourId, juce::Colour(0xffcccccc));
-    searchBox.setColour(juce::TextEditor::outlineColourId, juce::Colour(0xff3a3a5a));
-    searchBox.setFont(juce::Font(juce::FontOptions(12.0f)));
+    searchBox.setFont(juce::Font(AppTheme::uiFont(12.0f)));
     searchBox.onTextChange = [this]() { onSearchTextChanged(); };
     addAndMakeVisible(searchBox);
 
     // Hide empty button
     hideEmptyButton.setButtonText("Hide Empty");
-    hideEmptyButton.setColour(juce::ToggleButton::textColourId, juce::Colour(0xffcccccc));
     hideEmptyButton.onClick = [this]() { onHideEmptyToggled(); };
     addAndMakeVisible(hideEmptyButton);
 
     // Refresh button
     refreshButton.setButtonText("Refresh");
-    refreshButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a5a));
-    refreshButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xffcccccc));
     refreshButton.onClick = [this]() { onRefreshClicked(); };
     addAndMakeVisible(refreshButton);
 
     // TreeView for patch browser
     treeView = std::make_unique<juce::TreeView>();
-    treeView->setColour(juce::TreeView::backgroundColourId, juce::Colour(0xff1e1e3a));
-    treeView->setColour(juce::TreeView::linesColourId, juce::Colour(0xff3a3a5a));
     treeView->setDefaultOpenness(false);  // Banks start collapsed
     treeView->setIndentSize(20);
     addAndMakeVisible(*treeView);
 
-    setLoadingState(false);    applyFilters();}
+    applyTheme();
+    setLoadingState(false);
+}
+
+void PatchBrowserPanel::applyTheme()
+{
+    statusLabel.setColour(juce::Label::textColourId, AppTheme::palette().textMuted);
+    searchLabel.setColour(juce::Label::textColourId, AppTheme::palette().textSecondary);
+    searchBox.setColour(juce::TextEditor::backgroundColourId, AppTheme::palette().inputBackground);
+    searchBox.setColour(juce::TextEditor::textColourId, AppTheme::palette().textSecondary);
+    searchBox.setColour(juce::TextEditor::outlineColourId, AppTheme::palette().borderColor);
+    hideEmptyButton.setColour(juce::ToggleButton::textColourId, AppTheme::palette().textSecondary);
+    refreshButton.setColour(juce::TextButton::buttonColourId, AppTheme::palette().borderColor);
+    refreshButton.setColour(juce::TextButton::textColourOffId, AppTheme::palette().textSecondary);
+
+    if (treeView)
+    {
+        treeView->setColour(juce::TreeView::backgroundColourId, AppTheme::palette().backgroundPanel);
+        treeView->setColour(juce::TreeView::linesColourId, AppTheme::palette().borderColor);
+        treeView->repaint();
+    }
+
+    repaint();
+}
 
 void PatchBrowserPanel::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colour(0xff1e1e3a));
+    g.fillAll(AppTheme::palette().backgroundPanel);
 }
 
 void PatchBrowserPanel::resized()
@@ -121,7 +132,9 @@ void PatchBrowserPanel::setPatchList(const std::vector<std::string>& names)
 
 void PatchBrowserPanel::applyFilters()
 {
-    scanSnippetFiles();
+    if (cachedPatchList.empty())
+        return;
+
     rebuildTree(cachedPatchList);
 }
 
@@ -174,6 +187,16 @@ void PatchBrowserPanel::setLoadedPatch(int section, int position)
     treeView->repaint();
 }
 
+void PatchBrowserPanel::setSelectedPatch(int section, int position)
+{
+    if (selectedSection == section && selectedPosition == position)
+        return;
+
+    selectedSection = section;
+    selectedPosition = position;
+    treeView->repaint();
+}
+
 void PatchBrowserPanel::rebuildTree(const std::vector<std::string>& names)
 {
     std::cout << "[INSPECTOR] rebuildTree starting, names.size()=" << names.size() << std::endl;
@@ -183,14 +206,12 @@ void PatchBrowserPanel::rebuildTree(const std::vector<std::string>& names)
     rootItem.reset();
 
     // Create new root item
-    rootItem = std::make_unique<PatchTreeItem>("Browser");
+    rootItem = std::make_unique<PatchTreeItem>("Synth Patches");
 
     // Expected: 891 entries (9 banks × 99 positions)
     // names[section * 99 + position]
 
     bool hasSearchFilter = currentSearchText.isNotEmpty();
-
-    auto* synthRoot = new PatchTreeItem("Synth Patches", -1, -1, this);
 
     for (int section = 0; section < 9; ++section)
     {
@@ -230,7 +251,7 @@ void PatchBrowserPanel::rebuildTree(const std::vector<std::string>& names)
             juce::String itemName = juce::String(displayLocation).paddedLeft('0', 3)
                                   + ": " + displayName;
 
-            auto* patchItem = new PatchTreeItem(itemName, section, position, this);
+            auto* patchItem = new PatchTreeItem(itemName, section, position, this, isEmpty);
             bankItem->addSubItem(patchItem);
             patchesAdded++;
         }
@@ -238,7 +259,7 @@ void PatchBrowserPanel::rebuildTree(const std::vector<std::string>& names)
         // Only add bank if it has visible patches
         if (patchesAdded > 0)
         {
-            synthRoot->addSubItem(bankItem);
+            rootItem->addSubItem(bankItem);
             std::cout << "[INSPECTOR]   Added bank " << displaySection << " with " << patchesAdded << " patches" << std::endl;
         }
         else
@@ -248,22 +269,6 @@ void PatchBrowserPanel::rebuildTree(const std::vector<std::string>& names)
             delete bankItem;
         }
     }
-
-    if (synthRoot->getNumSubItems() > 0)
-        rootItem->addSubItem(synthRoot);
-    else
-        delete synthRoot;
-
-    auto* snippetsRoot = new PatchTreeItem("Snippets", -1, -1, this);
-    for (const auto& snippet : snippetFiles)
-    {
-        auto name = snippet.getFileNameWithoutExtension();
-        snippetsRoot->addSubItem(new PatchTreeItem(name, -1, -1, this, snippet.getFullPathName()));
-    }
-    if (snippetsRoot->getNumSubItems() > 0)
-        rootItem->addSubItem(snippetsRoot);
-    else
-        delete snippetsRoot;
 
     std::cout << "[INSPECTOR] Setting root item in tree view, rootItem=" << (void*)rootItem.get() << std::endl;
     std::cout << "[INSPECTOR] Root item has " << rootItem->getNumSubItems() << " sub-items" << std::endl;
@@ -279,27 +284,31 @@ void PatchBrowserPanel::rebuildTree(const std::vector<std::string>& names)
 // --- PatchTreeItem implementation ---
 
 PatchBrowserPanel::PatchTreeItem::PatchTreeItem(const juce::String& name, int sec, int pos,
-                                                PatchBrowserPanel* parent, const juce::String& path)
-    : itemName(name), section(sec), position(pos), panel(parent), snippetPath(path)
+                                                PatchBrowserPanel* parent, bool isEmptySlot)
+    : itemName(name), section(sec), position(pos), panel(parent), empty(isEmptySlot)
 {
+}
+
+juce::var PatchBrowserPanel::PatchTreeItem::getDragSourceDescription()
+{
+    // Bank nodes and empty positions are not patches, and JUCE leaves an item
+    // undraggable when this returns void, which is exactly right for them.
+    if (section < 0 || position < 0 || empty)
+        return {};
+
+    auto* payload = new juce::DynamicObject();
+    payload->setProperty("type", "synthPatch");
+    payload->setProperty("section", section);
+    payload->setProperty("position", position);
+    // Only for what the drop shows the user while it is over a slot.
+    payload->setProperty("name", itemName.fromFirstOccurrenceOf(": ", false, false));
+    return juce::var(payload);
 }
 
 bool PatchBrowserPanel::PatchTreeItem::mightContainSubItems()
 {
     // Bank nodes (section >= 0, position == -1) can contain patches
-    return (position == -1 && snippetPath.isEmpty());
-}
-
-juce::var PatchBrowserPanel::PatchTreeItem::getDragSourceDescription()
-{
-    if (snippetPath.isEmpty())
-        return {};
-
-    auto desc = new juce::DynamicObject();
-    desc->setProperty("type", "snippet");
-    desc->setProperty("file", snippetPath);
-    desc->setProperty("name", itemName);
-    return juce::var(desc);
+    return (section >= 0 && position == -1);
 }
 
 void PatchBrowserPanel::PatchTreeItem::paintItem(juce::Graphics& g, int width, int height)
@@ -308,40 +317,50 @@ void PatchBrowserPanel::PatchTreeItem::paintItem(juce::Graphics& g, int width, i
                      && section >= 0 && position >= 0
                      && section == panel->loadedSection
                      && position == panel->loadedPosition);
+    bool isSelected = (panel != nullptr
+                       && section >= 0 && position >= 0
+                       && section == panel->selectedSection
+                       && position == panel->selectedPosition);
 
-    if (isLoaded)
+    if (isSelected)
+    {
+        g.setColour(isLoaded ? juce::Colour(0x44ffaa00)
+                             : AppTheme::palette().backgroundElevated.withAlpha(0.33f));
+        g.fillRect(0, 0, width, height);
+
+        g.setColour(isLoaded ? AppTheme::palette().accentActive
+                             : AppTheme::palette().textPrimary);
+        g.drawRect(0, 0, width, height);
+    }
+    else if (isLoaded)
     {
         // Subtle highlight background for the loaded patch
         g.setColour(juce::Colour(0x33ffaa00));
         g.fillRect(0, 0, width, height);
     }
 
-    juce::Colour textColor = isLoaded ? juce::Colour(0xffffcc44) : juce::Colour(0xffcccccc);
+    juce::Colour textColor = isLoaded ? AppTheme::palette().accentActive
+                            : isSelected ? AppTheme::palette().textPrimary
+                                         : AppTheme::palette().textSecondary;
 
     if (section >= 0 && position == -1)
     {
         // Bank node — bold
         g.setColour(textColor);
-        g.setFont(juce::Font(juce::FontOptions(13.0f)).boldened());
-        g.drawText(itemName, 4, 0, width - 4, height, juce::Justification::centredLeft, true);
-    }
-    else if (snippetPath.isNotEmpty())
-    {
-        g.setColour(juce::Colour(0xff99ddff));
-        g.setFont(juce::Font(juce::FontOptions(12.0f)));
+        g.setFont(juce::Font(AppTheme::uiFont(13.0f)).boldened());
         g.drawText(itemName, 4, 0, width - 4, height, juce::Justification::centredLeft, true);
     }
     else
     {
         g.setColour(textColor);
-        g.setFont(juce::Font(juce::FontOptions(isLoaded ? 12.5f : 12.0f)));
+        g.setFont(juce::Font(AppTheme::uiFont(isLoaded ? 12.5f : 12.0f)));
 
         if (isLoaded)
         {
             // Draw play indicator
-            g.setFont(juce::Font(juce::FontOptions(10.0f)));
+            g.setFont(juce::Font(AppTheme::uiFont(10.0f)));
             g.drawText(juce::CharPointer_UTF8("\xe2\x96\xb6"), 2, 0, 12, height, juce::Justification::centredLeft);
-            g.setFont(juce::Font(juce::FontOptions(12.5f)));
+            g.setFont(juce::Font(AppTheme::uiFont(12.5f)));
             g.drawText(itemName, 16, 0, width - 16, height, juce::Justification::centredLeft, true);
         }
         else
@@ -356,7 +375,16 @@ void PatchBrowserPanel::PatchTreeItem::itemClicked(const juce::MouseEvent& e)
     // Right-click: show context menu for patches (not banks)
     if (e.mods.isPopupMenu() && section >= 0 && position >= 0)
     {
+        if (panel)
+            panel->setSelectedPatch(section, position);
         showContextMenu();
+        return;
+    }
+
+    // Single-click: select patches so users get immediate feedback before double-click loading
+    if (section >= 0 && position >= 0 && panel)
+    {
+        panel->setSelectedPatch(section, position);
         return;
     }
 
@@ -369,12 +397,6 @@ void PatchBrowserPanel::PatchTreeItem::itemClicked(const juce::MouseEvent& e)
 
 void PatchBrowserPanel::PatchTreeItem::itemDoubleClicked(const juce::MouseEvent&)
 {
-    if (snippetPath.isNotEmpty() && panel && panel->onSnippetDoubleClicked)
-    {
-        panel->onSnippetDoubleClicked(juce::File(snippetPath));
-        return;
-    }
-
     // Double-click on a patch (not a bank): load it
     if (section >= 0 && position >= 0 && panel && panel->onPatchDoubleClicked)
     {
@@ -383,30 +405,17 @@ void PatchBrowserPanel::PatchTreeItem::itemDoubleClicked(const juce::MouseEvent&
     }
 }
 
-juce::File PatchBrowserPanel::getSnippetDirectory() const
-{
-    return getDefaultSnippetDirectory();
-}
-
-void PatchBrowserPanel::scanSnippetFiles()
-{
-    snippetFiles.clear();
-    auto dir = getSnippetDirectory();
-    if (!dir.isDirectory())
-        return;
-
-    auto files = dir.findChildFiles(juce::File::findFiles, false, "*.pch");
-    files.sort();
-    for (const auto& f : files)
-        snippetFiles.add(f);
-}
-
 void PatchBrowserPanel::PatchTreeItem::showContextMenu()
 {
     if (!panel)
         return;
 
     juce::PopupMenu menu;
+    // Ids 10..13 are Load to Slot A..D.
+    for (int slot = 0; slot < 4; ++slot)
+        menu.addItem(10 + slot,
+                     "Load to Slot " + juce::String::charToString(static_cast<char>('A' + slot)));
+    menu.addSeparator();
     menu.addItem(1, "Delete (clear)");
     menu.addSeparator();
     menu.addItem(2, "Copy to...");
@@ -435,6 +444,8 @@ void PatchBrowserPanel::PatchTreeItem::showContextMenu()
                     break;
 
                 default:
+                    if (result >= 10 && result < 14 && panel->onPatchLoadToSlot)
+                        panel->onPatchLoadToSlot(section, position, result - 10);
                     break;
             }
         });

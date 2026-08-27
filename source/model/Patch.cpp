@@ -1,5 +1,6 @@
 #include "Patch.h"
 #include "ModuleDescriptions.h"
+#include <set>
 
 // --- Module ---
 
@@ -141,6 +142,14 @@ void ModuleContainer::removeModule(Module* module)
         modules.end());
 }
 
+bool ModuleContainer::contains(const Module* module) const
+{
+    if (module == nullptr) return false;
+    for (auto& m : modules)
+        if (m.get() == module) return true;
+    return false;
+}
+
 bool ModuleContainer::canAdd(const ModuleDescriptor& desc) const
 {
     if (desc.limit <= 0)
@@ -156,6 +165,13 @@ bool ModuleContainer::canAdd(const ModuleDescriptor& desc) const
 
 void ModuleContainer::addConnection(Connector* output, Connector* input)
 {
+    if (output == nullptr || input == nullptr)
+        return;
+
+    for (const auto& c : connections)
+        if (c.output == output && c.input == input)
+            return;
+
     connections.push_back({ output, input });
     if (onCableAdded)
         onCableAdded(output, input);
@@ -163,11 +179,17 @@ void ModuleContainer::addConnection(Connector* output, Connector* input)
 
 void ModuleContainer::removeConnection(Connector* output, Connector* input)
 {
+    bool removed = false;
     connections.erase(
         std::remove_if(connections.begin(), connections.end(),
-            [output, input](const Connection& c) { return c.output == output && c.input == input; }),
+            [output, input, &removed](const Connection& c)
+            {
+                const bool match = c.output == output && c.input == input;
+                removed = removed || match;
+                return match;
+            }),
         connections.end());
-    if (onCableRemoved)
+    if (removed && onCableRemoved)
         onCableRemoved(output, input);
 }
 
@@ -189,10 +211,47 @@ void ModuleContainer::removeConnectionsForConnector(Connector* conn)
         connections.end());
 }
 
+Connector* ModuleContainer::findNetOutput(Connector* start,
+                                          const Connector* ignoreOutput,
+                                          const Connector* ignoreInput)
+{
+    if (start == nullptr)
+        return nullptr;
+
+    std::vector<Connector*> stack { start };
+    std::set<Connector*> visited { start };
+
+    while (!stack.empty())
+    {
+        auto* c = stack.back();
+        stack.pop_back();
+
+        if (c->getDescriptor()->isOutput)
+            return c;
+
+        for (const auto& conn : connections)
+        {
+            // The one cable a re-route is carrying counts as already gone.
+            if (ignoreOutput != nullptr
+                && conn.output == ignoreOutput && conn.input == ignoreInput)
+                continue;
+
+            Connector* other = nullptr;
+            if (conn.output == c)      other = conn.input;
+            else if (conn.input == c)  other = conn.output;
+
+            if (other != nullptr && visited.insert(other).second)
+                stack.push_back(other);
+        }
+    }
+
+    return nullptr;
+}
+
 Module* ModuleContainer::getModuleByIndex(int containerIndex)
 {
     for (auto& m : modules)
-        if (m->getContainerIndex() == containerIndex)
+        if (m != nullptr && m->getContainerIndex() == containerIndex)
             return m.get();
     return nullptr;
 }
@@ -200,7 +259,7 @@ Module* ModuleContainer::getModuleByIndex(int containerIndex)
 const Module* ModuleContainer::getModuleByIndex(int containerIndex) const
 {
     for (auto& m : modules)
-        if (m->getContainerIndex() == containerIndex)
+        if (m != nullptr && m->getContainerIndex() == containerIndex)
             return m.get();
     return nullptr;
 }
@@ -222,15 +281,20 @@ Module* Patch::createModule(int section, int typeId, int gridX, int gridY,
     if (!container.canAdd(*descriptor))
         return nullptr;
 
-    // Generate unique container index (find max existing + 1, starting from 1)
-    int maxIndex = 0;
+    // Module indices are serialized in seven bits. Reuse the lowest free one
+    // so repeated add/delete cycles cannot overflow past 127.
+    std::array<bool, 128> usedIndices {};
     for (auto& m : container.getModules())
     {
-        int idx = m->getContainerIndex();
-        if (idx > maxIndex)
-            maxIndex = idx;
+        const int index = m->getContainerIndex();
+        if (index >= 1 && index <= 127)
+            usedIndices[static_cast<size_t>(index)] = true;
     }
-    int newIndex = maxIndex + 1;
+    int newIndex = 1;
+    while (newIndex <= 127 && usedIndices[static_cast<size_t>(newIndex)])
+        ++newIndex;
+    if (newIndex > 127)
+        return nullptr;
 
     // Create module from descriptor
     auto module = Module::createFromDescriptor(*descriptor);
@@ -246,4 +310,25 @@ Module* Patch::createModule(int section, int typeId, int gridX, int gridY,
     Module* modulePtr = container.addModule(std::move(module));
 
     return modulePtr;
+}
+
+void Patch::applyCustomDumpEntry(int section, const CustomDumpEntry& entry)
+{
+    auto* module = getContainer(section).getModuleByIndex(entry.index);
+    if (module == nullptr)
+        return;
+
+    // Dump values map onto the module's custom-class parameters in
+    // descriptor order (parameters are built 1:1 from the descriptor).
+    size_t valueIdx = 0;
+    for (auto& p : module->getParameters())
+    {
+        if (p.getDescriptor()->paramClass != "custom")
+            continue;
+
+        if (valueIdx >= entry.values.size())
+            break;
+
+        p.setValue(entry.values[valueIdx++]);
+    }
 }

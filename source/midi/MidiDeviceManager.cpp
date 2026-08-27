@@ -1,4 +1,7 @@
 #include "MidiDeviceManager.h"
+#include "MidiMonitor.h"
+#include <cstdlib>
+#include <iostream>
 
 MidiDeviceManager::MidiDeviceManager(NmProtocol& proto)
     : protocol(proto)
@@ -67,9 +70,11 @@ void MidiDeviceManager::sendSysEx(const std::vector<uint8_t>& data)
             hex += juce::String::toHexString(b).paddedLeft('0', 2) + " ";
         DBG("TX SysEx [" + juce::String(data.size()) + "]: " + hex.trimEnd());
 #endif
+        MidiMonitor::instance().record(MidiMonitor::Direction::Tx, data.data(), data.size());
         midiOutput->sendMessageNow(juce::MidiMessage(data.data(), static_cast<int>(data.size())));
     }
 }
+
 
 juce::String MidiDeviceManager::getInputDeviceName() const
 {
@@ -91,6 +96,11 @@ void MidiDeviceManager::handleIncomingMidiMessage(juce::MidiInput*, const juce::
     auto* data = message.getRawData();
     auto size = message.getRawDataSize();
 
+    // Log every incoming SysEx (even non-Nord frames) before filtering, so the
+    // monitor can surface unexpected traffic.
+    MidiMonitor::instance().record(MidiMonitor::Direction::Rx,
+                                   data, static_cast<std::size_t>(size));
+
     // Wire format: F0 33 [header] 06 ...
     if (size < 5 || data[1] != 0x33 || data[3] != 0x06)
         return;
@@ -102,21 +112,28 @@ void MidiDeviceManager::handleIncomingMidiMessage(juce::MidiInput*, const juce::
     {
         if (!*aliveFlag) return;
 #if JUCE_DEBUG
-        // Suppress logging for high-frequency NMInfo messages (Lights=0x39, Meters=0x3a, VoiceCount=0x05)
-        bool suppress = false;
-        if (sysexCopy->size() >= 6)
+        // Hex-dumping every incoming SysEx is expensive (string building +
+        // synchronous console writes) and noticeably slows patch fetches.
+        // Opt in with NME_MIDI_LOG=1 when debugging protocol issues.
+        static const bool midiLogEnabled = (std::getenv("NME_MIDI_LOG") != nullptr);
+        if (midiLogEnabled)
         {
-            int cc = ((*sysexCopy)[2] >> 2) & 0x1F;
-            uint8_t sc = (*sysexCopy)[5];
-            if (cc == 0x14 && (sc == 0x39 || sc == 0x3a || sc == 0x05))
-                suppress = true;
-        }
-        if (!suppress)
-        {
-            juce::String hex;
-            for (auto b : *sysexCopy)
-                hex += juce::String::toHexString(b).paddedLeft('0', 2) + " ";
-            DBG("RX SysEx [" + juce::String(sysexCopy->size()) + "]: " + hex.trimEnd());
+            // Suppress logging for high-frequency NMInfo messages (Lights=0x39, Meters=0x3a, VoiceCount=0x05)
+            bool suppress = false;
+            if (sysexCopy->size() >= 6)
+            {
+                int cc = ((*sysexCopy)[2] >> 2) & 0x1F;
+                uint8_t sc = (*sysexCopy)[5];
+                if (cc == 0x14 && (sc == 0x39 || sc == 0x3a || sc == 0x05))
+                    suppress = true;
+            }
+            if (!suppress)
+            {
+                juce::String hex;
+                for (auto b : *sysexCopy)
+                    hex += juce::String::toHexString(b).paddedLeft('0', 2) + " ";
+                DBG("RX SysEx [" + juce::String(sysexCopy->size()) + "]: " + hex.trimEnd());
+            }
         }
 #endif
         protocol.processIncoming(sysexCopy->data(), sysexCopy->size());

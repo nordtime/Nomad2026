@@ -38,8 +38,9 @@ public:
             writeBits(ch, 8);
         }
 
-        // Null terminator
-        writeBits(0, 8);
+        // Null terminator only if the string didn't fill all 16 slots
+        if (len < 16)
+            writeBits(0, 8);
     }
 
     // Align to next 8-bit boundary
@@ -77,6 +78,29 @@ public:
             {
                 byte <<= (7 - (bits.size() - i));
             }
+            result.push_back(byte);
+        }
+
+        return result;
+    }
+
+    // Convert the bitstream to plain 8-bit bytes.
+    //
+    // The upload path needs this rather than toMidiBytes(): the synth is fed one
+    // continuous byte stream chopped into fixed-size packets, and each packet is
+    // 7-bit encoded on its own, so the 7-bit packing cannot happen per section.
+    std::vector<uint8_t> toBytes()
+    {
+        alignToByte();
+
+        std::vector<uint8_t> result;
+        result.reserve(bits.size() / 8);
+
+        for (size_t i = 0; i < bits.size(); i += 8)
+        {
+            uint8_t byte = 0;
+            for (int j = 0; j < 8; ++j)
+                byte = static_cast<uint8_t>((byte << 1) | bits[i + static_cast<size_t>(j)]);
             result.push_back(byte);
         }
 

@@ -1,61 +1,74 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "SelfOwnedDialog.h"
 #include <vector>
 #include <string>
 #include <functional>
+#include "FlatCloseButton.h"
 
-/**
- * Dialog for selecting a patch location (Slot + Bank + Position).
- * Position dropdown shows patch names from the selected bank.
- */
-class PatchLocationDialog : public juce::Component
+class PatchLocationDialog : public SelfOwnedDialog
 {
 public:
     struct Result
     {
-        int slot = 0;       // 0-3
-        int section = 0;    // 0-8
-        int position = 0;   // 0-98
+        int  slot      = 0;
+        int  section   = 0;
+        int  position  = 0;
         bool confirmed = false;
     };
 
     using Callback = std::function<void(const Result&)>;
 
-    /**
-     * @param patchList All 891 patch names (9 banks × 99 positions)
-     * @param showSlot If true, shows Slot selector (A-D); if false, hides it
-     * @param currentSlot Default slot selection (0-3)
-     */
-    PatchLocationDialog(const std::vector<std::string>& patchList,
-                        bool showSlot = true,
-                        int currentSlot = 0);
+    // initialSection/initialPosition preselect a bank location (-1 = bank 1,
+    // position 1), so Store to Bank opens on the patch's own place instead of
+    // making you find it again every time.
+    PatchLocationDialog(const juce::String& title,
+                        const std::vector<std::string>& patchList,
+                        bool showSlot,
+                        int  currentSlot,
+                        Callback cb,
+                        int  initialSection = -1,
+                        int  initialPosition = -1);
 
-    void setCallback(Callback cb) { callback = std::move(cb); }
+    void paint   (juce::Graphics& g) override;
+    void resized () override;
+    bool keyPressed (const juce::KeyPress& key) override;
+    void mouseDown  (const juce::MouseEvent& e) override;
+    void mouseDrag  (const juce::MouseEvent& e) override;
 
-    void resized() override;
-    void paint(juce::Graphics& g) override;
+    static void show(juce::Component* parent,
+                     const juce::String& title,
+                     const std::vector<std::string>& patchList,
+                     bool showSlot,
+                     int  currentSlot,
+                     Callback cb,
+                     int  initialSection = -1,
+                     int  initialPosition = -1);
 
 private:
     void updatePositionItems();
-    void onConfirm();
-    void onCancel();
+    void confirm();
+    void cancel();
+    void close();
 
+    juce::String title_;
     const std::vector<std::string>& patchList_;
     bool showSlot_;
     Callback callback;
+    int initialPosition_ = -1;  // consumed by the first updatePositionItems()
+    juce::ComponentDragger dragger;
+    FlatCloseButton closeButton;
 
-    juce::Label slotLabel;
+    juce::Label    slotLabel     { {}, "SLOT" };
     juce::ComboBox slotCombo;
-
-    juce::Label bankLabel;
+    juce::Label    bankLabel     { {}, "BANK" };
     juce::ComboBox bankCombo;
-
-    juce::Label positionLabel;
+    juce::Label    positionLabel { {}, "POSITION" };
     juce::ComboBox positionCombo;
 
-    juce::TextButton confirmButton;
-    juce::TextButton cancelButton;
+    juce::TextButton okButton     { "OK" };
+    juce::TextButton cancelButton { "Cancel" };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PatchLocationDialog)
 };

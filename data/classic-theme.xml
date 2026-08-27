@@ -234,31 +234,31 @@ label{fill:#000;}
 			<parameter component-id="p2" alt="sample rate" />
 		</textDisplay>
 	</module>
-	<module component-id="m32" width="255" height="120">
+	<module component-id="m32" width="255" height="105">
 		<name>FilterBank</name>
 		<image x="6" y="14" width="243" height="84" xlink:href="url(#groupbox)" />
-		<connector x="194" y="103" size="13" class="cAUDIO">
+		<connector x="186" y="83" size="13" class="cAUDIO">
 			<connector component-id="c1" alt="in" />
 		</connector>
-		<connector x="238" y="103" size="13" class="cAUDIO">
+		<connector x="236" y="83" size="13" class="cAUDIO">
 			<connector component-id="c2" alt="out" />
 		</connector>
-		<button x="218" y="100" width="16" height="14" cyclic="true" landscape="false">
+		<button x="210" y="82" width="16" height="14" cyclic="true" landscape="false">
 			<parameter component-id="p15" alt="bypass" />
 			<btn index="1">B</btn>
 			<btn index="0">B</btn>
 		</button>
-		<button x="101" y="82" width="24" height="12" cyclic="true" landscape="true">
+		<button x="11" y="82" width="24" height="12" cyclic="true" landscape="true">
 			<call method="min" />
 			<btn index="0">Min</btn>
 			<btn index="1">Min</btn>
 		</button>
-		<button x="129" y="82" width="24" height="12" cyclic="true" landscape="true">
+		<button x="39" y="82" width="24" height="12" cyclic="true" landscape="true">
 			<call method="max" />
 			<btn index="0">Max</btn>
 			<btn index="1">Max</btn>
 		</button>
-		<button x="157" y="82" width="24" height="12" cyclic="true" landscape="true">
+		<button x="67" y="82" width="24" height="12" cyclic="true" landscape="true">
 			<call method="rnd" />
 			<btn index="0">Rnd</btn>
 			<btn index="1">Rnd</btn>
@@ -657,11 +657,11 @@ label{fill:#000;}
 		<knob x="199" y="27" size="21">
 			<parameter component-id="p10" alt="Filter decay" />
 		</knob>
-		<button x="225" y="6" width="22" height="44" cyclic="false" landscape="false">
+		<button x="225" y="6" width="22" height="44" cyclic="false" landscape="false" reverse="true">
 			<parameter component-id="p11" alt="Filter mode" />
-			<btn index="2">LP</btn>
+			<btn index="2">HP</btn>
 			<btn index="1">BP</btn>
-			<btn index="0">HP</btn>
+			<btn index="0">LP</btn>
 		</button>
 		<knob x="123" y="77" size="21">
 			<parameter component-id="p12" alt="Amount" />
@@ -1250,7 +1250,7 @@ label{fill:#000;}
 	<module component-id="m53" width="255" height="30">
 		<name>Sample&amp;Hold</name>
 		<image x="167" y="3" width="68" height="16" xlink:href="./images/single/decoration-1.svg" />
-		<connector x="161" y="8" size="13" class="cAUDIO">
+		<connector x="161" y="8" size="13" class="cLOGIC">
 			<connector component-id="c1" alt="trig" />
 		</connector>
 		<connector x="197" y="8" size="13" class="cAUDIO">
@@ -1627,7 +1627,7 @@ label{fill:#000;}
 		</button>
 		<button x="2" y="60" width="20" height="12" cyclic="true" landscape="false">
 			<parameter component-id="p19" alt="monitor" />
-			<btn index="0">Mon</btn>
+			<btn index="0">Off</btn>
 			<btn index="1">Mon</btn>
 		</button>
 		<vocoder-display name="vocoderDisp" x="26" y="25" width="192" height="50">
@@ -2055,7 +2055,7 @@ label{fill:#000;}
 	</module>
 	<module component-id="m15" width="255" height="105">
 		<name>NoteSeqA</name>
-		<connector x="6" y="33" size="13" class="cCONTROL">
+		<connector x="6" y="33" size="13" class="cLOGIC">
 			<connector component-id="c1" alt="sync" />
 		</connector>
 		<connector x="6" y="60" size="13" class="cLOGIC">
@@ -2094,10 +2094,20 @@ label{fill:#000;}
 			<btn index="1"> <image xlink:href="./images/slice/stop.png" /></btn>
 		</button> 
 		<button x="125" y="5" width="20" height="14" cyclic="true" landscape="false">
-			<parameter component-id="p21" alt="loop" />			
+			<parameter component-id="p21" alt="loop" />
 			<btn index="0"> <image xlink:href="./images/slice/loop_off.png" /> </btn>
 			<btn index="1"> <image xlink:href="./images/slice/loop_on.png" /> </btn>
-		</button> 
+		</button>
+		<button x="78" y="5" width="22" height="14" cyclic="true" landscape="true">
+			<call method="randomize" />
+			<btn index="0">Rnd</btn>
+			<btn index="1">Rnd</btn>
+		</button>
+		<button x="100" y="5" width="22" height="14" cyclic="true" landscape="true">
+			<call method="clear" />
+			<btn index="0">Clr</btn>
+			<btn index="1">Clr</btn>
+		</button>
 		<label x="152" y="5">Step</label>
 		<textDisplay x="174" y="5" width="20" height="14">
 			<parameter component-id="p17" alt="step count" />
@@ -2108,27 +2118,27 @@ label{fill:#000;}
 		<label x="217" y="60">Link</label>
 		<label x="217" y="75">Gclk</label>
 		<label x="218" y="90">Out</label>
-		<label x="28" y="19">1</label>
-		<label x="39" y="19">2</label>
-		<label x="52" y="19">3</label>
-		<label x="63" y="19">4</label>
-		<label x="74" y="19">5</label>
-		<label x="87" y="19">6</label>
-		<label x="98" y="19">7</label>
-		<label x="109" y="19">8</label>
-		<label x="121" y="19">9</label>
-		<label x="132" y="19">10</label>
-		<label x="145" y="19">11</label>
-		<label x="158" y="19">12</label>
-		<label x="169" y="19">13</label>
-		<label x="181" y="19">14</label>
-		<label x="193" y="19">15</label>
-		<label x="205" y="19">16</label>
+		<label x="24" y="19" width="11" height="10" align="centre">1</label>
+		<label x="36" y="19" width="11" height="10" align="centre">2</label>
+		<label x="48" y="19" width="11" height="10" align="centre">3</label>
+		<label x="60" y="19" width="11" height="10" align="centre">4</label>
+		<label x="72" y="19" width="11" height="10" align="centre">5</label>
+		<label x="84" y="19" width="11" height="10" align="centre">6</label>
+		<label x="96" y="19" width="11" height="10" align="centre">7</label>
+		<label x="108" y="19" width="11" height="10" align="centre">8</label>
+		<label x="120" y="19" width="11" height="10" align="centre">9</label>
+		<label x="132" y="19" width="11" height="10" align="centre">10</label>
+		<label x="144" y="19" width="11" height="10" align="centre">11</label>
+		<label x="156" y="19" width="11" height="10" align="centre">12</label>
+		<label x="168" y="19" width="11" height="10" align="centre">13</label>
+		<label x="180" y="19" width="11" height="10" align="centre">14</label>
+		<label x="192" y="19" width="11" height="10" align="centre">15</label>
+		<label x="204" y="19" width="11" height="10" align="centre">16</label>
 		
 		
-		<light component-id="ledStep1-16" type="led-array" x="27" y="30" width="190" height="7" /> 
-		
-		
+		<light component-id="ledStep1-16" type="led-array" x="24" y="30" width="192" height="7" />
+
+
 		<slider x="24" y="39" width="11" height="50" orientation="vertical">
 			<parameter component-id="p1" alt="xy" />
 		</slider>
@@ -2180,7 +2190,7 @@ label{fill:#000;}
 	</module>
 	<module component-id="m107" width="255" height="75">
 		<name>SpectralOsc</name>
-		<image x="157" y="4" width="48" height="72" xlink:href="url(#groupbox)" />
+		<image x="157" y="4" width="48" height="71" xlink:href="url(#groupbox)" />
 		<connector x="90" y="57" size="13" class="cAUDIO">
 			<connector component-id="c1" alt="fma" />
 		</connector>
@@ -2770,9 +2780,9 @@ label{fill:#000;}
 		<knob x="125" y="7" size="19">
 			<parameter component-id="p1" alt="range" />
 		</knob>
-		<knob x="163" y="7" size="19">
+		<textDisplay x="155" y="10" width="40" height="16" partialFormat="true">
 			<parameter component-id="p2" alt="notes" />
-		</knob>
+		</textDisplay>
 		<textDisplay x="91" y="10" width="30" height="16">
 			<parameter component-id="p1" alt="range" />
 		</textDisplay>
@@ -3053,10 +3063,20 @@ label{fill:#000;}
 	            <btn index="1"><image xlink:href="url(#btn-right-arrow)" /></btn>
         	</button>
 		<button x="125" y="5" width="20" height="14" cyclic="true" landscape="false">
-			<parameter component-id="p2" alt="loop/active" />			
+			<parameter component-id="p2" alt="loop/active" />
 			<btn index="0"> <image xlink:href="./images/slice/loop_off.png" /> </btn>
 			<btn index="1"> <image xlink:href="./images/slice/loop_on.png" /> </btn>
-		</button> 
+		</button>
+		<button x="78" y="5" width="22" height="14" cyclic="true" landscape="true">
+			<call method="randomize" />
+			<btn index="0">Rnd</btn>
+			<btn index="1">Rnd</btn>
+		</button>
+		<button x="100" y="5" width="22" height="14" cyclic="true" landscape="true">
+			<call method="clear" />
+			<btn index="0">Clr</btn>
+			<btn index="1">Clr</btn>
+		</button>
 		<button x="217" y="35" width="14" height="16" cyclic="true" landscape="false">
 			<parameter component-id="p3" alt="gate1" />
 			<btn index="0">G</btn>
@@ -3170,7 +3190,7 @@ label{fill:#000;}
 		<label x="234" y="23">Out</label>
 		<label x="217" y="4">Link</label>
 		
-		<light component-id="ledStep1-16" type="led-array" x="27" y="28" width="190" height="7" /> 
+		<light component-id="ledStep1-16" type="led-array" x="23" y="28" width="192" height="7" />
 		<label x="152" y="5">Step</label>
 		<textDisplay x="174" y="5" width="20" height="14">
 			<parameter component-id="p1" alt="stepcount" />
@@ -3297,7 +3317,7 @@ label{fill:#000;}
 			<parameter component-id="p1" alt="rate" />
 		</textDisplay>
 		<textDisplay x="90" y="22" width="40" height="16">
-			<parameter component-id="p3" alt="center freq mod" />
+			<parameter component-id="p4" alt="center freq" />
 		</textDisplay>
 		<label x="14" y="19">Rate</label>
 		<label x="52" y="19">Depth</label>
@@ -3312,6 +3332,7 @@ label{fill:#000;}
 			<feedback component-id="p6" alt="feedback" />
 			<peaks component-id="p7" alt="peaks" />
 			<spread component-id="p8" alt="spread" />
+			<frequency component-id="p4" alt="center freq" />
 	    </phaser-display>
    		<light component-id="ledAudioOut" type="led" x="240" y="80" width="7" height="7" /> 
 	</module>
@@ -4083,9 +4104,9 @@ label{fill:#000;}
 	</module>
 	<module component-id="m90" width="255" height="135">
 		<name>NoteSeqB</name>
-		
+
 		<label x="3" y="13">Clk</label>
-		<connector x="3" y="25" size="13" class="cCONTROL">
+		<connector x="3" y="25" size="13" class="cLOGIC">
 			<connector component-id="c1" alt="clock" />
 		</connector>
 		
@@ -4422,7 +4443,7 @@ label{fill:#000;}
 	</module>
 	<module component-id="m91" width="255" height="105">
 		<name>CtrlSeq</name>
-		<connector x="6" y="33" size="13" class="cCONTROL">
+		<connector x="6" y="33" size="13" class="cLOGIC">
 			<connector component-id="c1" alt="clock" />
 		</connector>
 		<connector x="6" y="60" size="13" class="cLOGIC">
@@ -4448,10 +4469,20 @@ label{fill:#000;}
 			<btn index="1">Uni</btn>
 		</button>
 		<button x="125" y="5" width="20" height="14" cyclic="true" landscape="false">
-			<parameter component-id="p19" alt="loop" />			
+			<parameter component-id="p19" alt="loop" />
 			<btn index="0"> <image xlink:href="./images/slice/loop_off.png" /> </btn>
 			<btn index="1"> <image xlink:href="./images/slice/loop_on.png" /> </btn>
-		</button> 
+		</button>
+		<button x="76" y="5" width="22" height="14" cyclic="true" landscape="true">
+			<call method="clear" />
+			<btn index="0">Clr</btn>
+			<btn index="1">Clr</btn>
+		</button>
+		<button x="100" y="5" width="22" height="14" cyclic="true" landscape="true">
+			<call method="randomize" />
+			<btn index="0">Rnd</btn>
+			<btn index="1">Rnd</btn>
+		</button>
 		<label x="152" y="5">Step</label>
 		<textDisplay x="174" y="5" width="20" height="14">
 			<parameter component-id="p17" alt="step" />
@@ -4461,25 +4492,25 @@ label{fill:#000;}
 		<label x="2" y="75">Sync</label>
 		<label x="219" y="41">Link</label>
 		<label x="235" y="75">Out</label>
-		<label x="27" y="19">1</label>
-		<label x="38" y="19">2</label>
-		<label x="50" y="19">3</label>
-		<label x="63" y="19">4</label>
-		<label x="74" y="19">5</label>
-		<label x="86" y="19">6</label>
-		<label x="98" y="19">7</label>
-		<label x="110" y="19">8</label>
-		<label x="122" y="19">9</label>
-		<label x="132" y="19">10</label>
-		<label x="145" y="19">11</label>
-		<label x="156" y="19">12</label>
-		<label x="169" y="19">13</label>
-		<label x="181" y="19">14</label>
-		<label x="192" y="19">15</label>
-		<label x="204" y="19">16</label>
+		<label x="24" y="19" width="11" height="10" align="centre">1</label>
+		<label x="36" y="19" width="11" height="10" align="centre">2</label>
+		<label x="48" y="19" width="11" height="10" align="centre">3</label>
+		<label x="60" y="19" width="11" height="10" align="centre">4</label>
+		<label x="72" y="19" width="11" height="10" align="centre">5</label>
+		<label x="84" y="19" width="11" height="10" align="centre">6</label>
+		<label x="96" y="19" width="11" height="10" align="centre">7</label>
+		<label x="108" y="19" width="11" height="10" align="centre">8</label>
+		<label x="120" y="19" width="11" height="10" align="centre">9</label>
+		<label x="132" y="19" width="11" height="10" align="centre">10</label>
+		<label x="144" y="19" width="11" height="10" align="centre">11</label>
+		<label x="156" y="19" width="11" height="10" align="centre">12</label>
+		<label x="168" y="19" width="11" height="10" align="centre">13</label>
+		<label x="180" y="19" width="11" height="10" align="centre">14</label>
+		<label x="192" y="19" width="11" height="10" align="centre">15</label>
+		<label x="204" y="19" width="11" height="10" align="centre">16</label>
 		
-		<light component-id="ledStep1-16" type="led-array" x="28" y="30" width="190" height="7" /> 
-		
+		<light component-id="ledStep1-16" type="led-array" x="24" y="30" width="192" height="7" />
+
 		<slider x="24" y="37" width="11" height="47" orientation="vertical">
 			<parameter component-id="p1" alt="xy" />
 		</slider>

@@ -13,6 +13,24 @@ int PatchParser::bitWidth(int maxValue)
     return bits;
 }
 
+static int pdlBitWidth(int maxValue)
+{
+    if (maxValue <= 0) return 1;
+    int bits = 0, v = maxValue;
+    while (v > 0) { bits++; v >>= 1; }
+    return bits;
+}
+
+static int parameterBitWidth(const ModuleDescriptor& desc, const ParameterDescriptor& pd)
+{
+    // PDL2 Param97 stores MasterOsc.kbt as 7 bits even though modules.xml
+    // describes the UI range as Off/On.
+    if (desc.index == 97 && pd.index == 2 && pd.paramClass == "parameter")
+        return 7;
+
+    return pdlBitWidth(pd.maxValue);
+}
+
 std::unique_ptr<Patch> PatchParser::parse(const std::vector<std::vector<uint8_t>>& sections)
 {
     auto patch = std::make_unique<Patch>();
@@ -41,6 +59,13 @@ std::unique_ptr<Patch> PatchParser::parse(const std::vector<std::vector<uint8_t>
         }
     }
 
+    // Apply collected custom dumps now that every ModuleDump has been parsed
+    // (the synth does not guarantee section order across packets).
+    for (const auto& entry : patch->polyCustomDump)
+        patch->applyCustomDumpEntry(1, entry);
+    for (const auto& entry : patch->commonCustomDump)
+        patch->applyCustomDumpEntry(0, entry);
+
     DBG("PatchParser: done. Patch name: \"" + patch->getName() + "\"");
     DBG("  Poly modules: " + juce::String(patch->getPolyVoiceArea().getModules().size())
         + ", Common modules: " + juce::String(patch->getCommonArea().getModules().size()));
@@ -57,6 +82,7 @@ void PatchParser::parseSection(BitStream& bs, Patch& patch)
 
     DBG("PatchParser: section type=" + juce::String(type)
         + " at bit " + juce::String(sectionStart));
+    juce::ignoreUnused(sectionStart);
 
     switch (type)
     {
@@ -197,38 +223,44 @@ void PatchParser::parseCableDump(BitStream& bs, Patch& patch)
         }
 
         int color       = static_cast<int>(bs.readBits(3));
-        int source      = static_cast<int>(bs.readBits(7));
-        int inputOutput = static_cast<int>(bs.readBits(6));
-        int type        = static_cast<int>(bs.readBits(1));
-        int destination = static_cast<int>(bs.readBits(7));
-        int input       = static_cast<int>(bs.readBits(6));
+        int firstModuleIndex = static_cast<int>(bs.readBits(7));
+        int firstConnectorIndex = static_cast<int>(bs.readBits(6));
+        int firstConnectorType = static_cast<int>(bs.readBits(1));  // 0=input, 1=output
+        int secondModuleIndex = static_cast<int>(bs.readBits(7));
+        int secondConnectorIndex = static_cast<int>(bs.readBits(6));
         (void)color; // stored implicitly through connector signal types
 
-        // type=1: source is output connector, destination is input (normal)
-        // type=0: source is input connector, destination is output
-        bool srcIsOutput = (type != 0);
+        // Binary cable record (per jpatch BitstreamPatchParser): the type bit
+        // belongs to the FIRST (source) end — 1 = output, 0 = a chained input
+        // (input→input cable) — and the second (destination) end is always an
+        // input.
+        bool firstIsOutput = (firstConnectorType != 0);
+        bool secondIsOutput = false;
 
-        auto* srcModule = container.getModuleByIndex(source);
-        auto* dstModule = container.getModuleByIndex(destination);
+        auto* firstModule = container.getModuleByIndex(firstModuleIndex);
+        auto* secondModule = container.getModuleByIndex(secondModuleIndex);
 
-        if (srcModule == nullptr || dstModule == nullptr)
+        if (firstModule == nullptr || secondModule == nullptr)
         {
-            DBG("    Cable: missing module src=" + juce::String(source)
-                + " dst=" + juce::String(destination));
+            DBG("    Cable: missing module first=" + juce::String(firstModuleIndex)
+                + " second=" + juce::String(secondModuleIndex));
             continue;
         }
 
-        auto* srcConn = srcModule->getConnector(inputOutput, srcIsOutput);
-        auto* dstConn = dstModule->getConnector(input, false);  // destination is always input
+        auto* firstConn = firstModule->getConnector(firstConnectorIndex, firstIsOutput);
+        auto* secondConn = secondModule->getConnector(secondConnectorIndex, secondIsOutput);
 
-        if (srcConn == nullptr || dstConn == nullptr)
+        if (firstConn == nullptr || secondConn == nullptr)
         {
-            DBG("    Cable: missing connector src_conn=" + juce::String(inputOutput)
-                + " dst_conn=" + juce::String(input));
+            DBG("    Cable: missing connector first_conn=" + juce::String(firstConnectorIndex)
+                + " first_type=" + juce::String(firstConnectorType)
+                + " second_conn=" + juce::String(secondConnectorIndex));
             continue;
         }
 
-        container.addConnection(srcConn, dstConn);
+        // Connection's "output" slot holds the source end — for a chained
+        // cable (type bit 0) that is itself an input connector.
+        container.addConnection(firstConn, secondConn);
     }
 }
 
@@ -263,7 +295,7 @@ void PatchParser::parseParameterDump(BitStream& bs, Patch& patch)
             if (pd.paramClass != "parameter")
                 continue;
 
-            int bits = bitWidth(pd.maxValue);
+            int bits = parameterBitWidth(*desc, pd);
             int value = static_cast<int>(bs.readBits(bits));
 
             if (module != nullptr)
@@ -372,6 +404,8 @@ void PatchParser::parseCustomDump(BitStream& bs, Patch& patch)
         for (int j = 0; j < nparams; ++j)
             entry.values.push_back(static_cast<int>(bs.readBits(8)));
 
+        // Only collect here — parse() applies the entries after all sections
+        // are in, so a CustomDump arriving before its ModuleDump still lands.
         dumpVec.push_back(std::move(entry));
     }
 }

@@ -3,6 +3,8 @@
 #include <juce_data_structures/juce_data_structures.h>
 #include "../model/Patch.h"
 #include "../model/ModuleDescriptions.h"
+#include "../model/ModulePlacement.h"
+#include "../model/SnipFileIO.h"
 #include "../midi/ConnectionManager.h"
 #include "../sync/PatchSynchronizer.h"
 #include "../protocol/MorphAssignmentMessage.h"
@@ -30,7 +32,23 @@ struct UndoContext
     std::unique_ptr<PatchSynchronizer>& syncPtr;  // may be null
     const ModuleDescriptions& descs;
     std::function<void()> repaint;         // repaint canvas + inspector refresh
+    // Same redraw for an edit that changes a value and nothing else. A parameter
+    // is not a module: the DSP figures and the morph/knob assignment list are
+    // exactly as they were, and rebuilding them on every click is part of why
+    // buttons felt heavier than knobs (issue #37) — a knob pays that cost once
+    // per drag, a button paid it on every press.
+    std::function<void()> repaintValues;
     std::function<void()> syncToSynth;    // full patch upload (may be null if not connected)
+    // Live parameter edits write through into the active patch variation (may be null).
+    // Deliberately NOT fired by bulk actions (recall/randomize) so undoing a
+    // variation recall can't overwrite the stored variation itself.
+    std::function<void(int section, int moduleId, int paramId, int value)> onParamEdited;
+    // Fired by an undo that puts a deleted module back, so the canvas can put
+    // the selection back with it: undoing a delete should hand you back what
+    // you had, not an empty selection over the module you just recovered.
+    // May be null.
+    std::function<void(int section, int containerIndex)> onModuleRestored;
+    int slot;  // which slot this context (and any edits sent below) belongs to
 };
 
 // ============================================================================
@@ -46,8 +64,31 @@ public:
 
     bool perform() override
     {
+        // The new module keeps the spot it was dropped on; whatever was already
+        // there moves down the column (issue #36). A column that cannot absorb
+        // the push refuses the drop instead of burying what is at the bottom
+        // (issue #54).
+        pushed_.clear();
+        auto& container = ctx_.patch.getContainer(section_);
+        if (auto* desc = ctx_.descs.getModuleByIndex(typeId_))
+        {
+            if (container.canAdd(*desc))
+            {
+                if (!canMakeRoomForModule(container, section_, gridX_, gridY_, desc->height,
+                                          {}, &ctx_.patch.getComments()))
+                    return false;
+                pushed_ = makeRoomForModule(container, section_, gridX_, gridY_, desc->height,
+                                            {}, &ctx_.patch.getComments());
+            }
+        }
+
         auto* mod = ctx_.patch.createModule(section_, typeId_, gridX_, gridY_, name_, ctx_.descs);
-        if (!mod) return false;
+        if (!mod)
+        {
+            restorePushedModules(ctx_.patch, pushed_);
+            pushed_.clear();
+            return false;
+        }
         containerIndex_ = mod->getContainerIndex();
         ctx_.repaint();
         return true;
@@ -63,6 +104,7 @@ public:
             SyncSuppressor guard(ctx_.syncPtr);
             container.removeModule(mod);
         }
+        restorePushedModules(ctx_.patch, pushed_);
         ctx_.repaint();
         if (ctx_.syncToSynth) ctx_.syncToSynth();
         return true;
@@ -71,11 +113,17 @@ public:
     int getSizeInUnits() override { return 1; }
     int getContainerIndex() const { return containerIndex_; }
 
+    // containerIndex assigned by createModule(), valid after a successful
+    // perform() - lets callers that don't already hold the Module* (e.g. the
+    // MCP bridge) report which index the new module landed on.
+    int getContainerIndex() const { return containerIndex_; }
+
 private:
     UndoContext& ctx_;
     int section_, typeId_, gridX_, gridY_;
     juce::String name_;
     int containerIndex_ = -1;
+    std::vector<PushedModule> pushed_;
 };
 
 // ============================================================================
@@ -275,6 +323,7 @@ public:
             ctx_.patch.ctrlAssignments.push_back(ca);
 
         ctx_.repaint();
+        if (ctx_.onModuleRestored) ctx_.onModuleRestored(section_, containerIndex_);
         if (ctx_.syncToSynth) ctx_.syncToSynth();
         return true;
     }
@@ -331,6 +380,273 @@ private:
     UndoContext& ctx_;
     int section_, moduleIndex_;
     juce::Point<int> oldPos_, newPos_;
+};
+
+// ============================================================================
+// RenameModuleAction — change a module's title (undoable). The name is pushed
+// to the synth right away with SetModuleTitle: relying on the NameDump section
+// of a full upload was not enough, because Store to Bank saves what the synth
+// already holds, so renames never made it into the stored patch.
+// ============================================================================
+class RenameModuleAction : public juce::UndoableAction
+{
+public:
+    RenameModuleAction(UndoContext& ctx, int section, int moduleIndex,
+                       const juce::String& oldName, const juce::String& newName)
+        : ctx_(ctx), section_(section), moduleIndex_(moduleIndex),
+          oldName_(oldName), newName_(newName) {}
+
+    bool perform() override { return apply(newName_); }
+    bool undo()    override { return apply(oldName_); }
+
+    int getSizeInUnits() override { return 1; }
+
+private:
+    bool apply(const juce::String& name)
+    {
+        auto* mod = ctx_.patch.getContainer(section_).getModuleByIndex(moduleIndex_);
+        if (!mod) return false;
+        mod->setTitle(name);
+        ctx_.connMgr.sendModuleTitle(ctx_.slot, section_, moduleIndex_, name);
+        ctx_.repaint();
+        return true;
+    }
+
+    UndoContext& ctx_;
+    int section_, moduleIndex_;
+    juce::String oldName_, newName_;
+};
+
+// ============================================================================
+// Comment actions - the editor's own text notes on the canvas. They never touch
+// the synth (it has no such module), so none of these send anything: they only
+// move text around the patch model and ask for a repaint.
+// ============================================================================
+class AddCommentAction : public juce::UndoableAction
+{
+public:
+    AddCommentAction(UndoContext& ctx, int section, int gridX, int gridY,
+                     int height, const juce::String& text, int width = 1)
+        : ctx_(ctx), section_(section), gridX_(gridX), gridY_(gridY),
+          width_(juce::jmax(1, width)), height_(height), text_(text) {}
+
+    bool perform() override
+    {
+        // Same courtesy a module gets: whatever is under it moves down, in each
+        // of the columns the note covers, and the same refusal when a column
+        // has no room left (issue #54).
+        pushed_.clear();
+        for (int col = 0; col < width_; ++col)
+            if (!canMakeRoomForModule(ctx_.patch.getContainer(section_), section_,
+                                      gridX_ + col, gridY_, height_, {},
+                                      &ctx_.patch.getComments(), commentId_))
+                return false;
+        for (int col = 0; col < width_; ++col)
+        {
+            auto made = makeRoomForModule(ctx_.patch.getContainer(section_), section_,
+                                          gridX_ + col, gridY_, height_, {},
+                                          &ctx_.patch.getComments(), commentId_);
+            pushed_.insert(pushed_.end(), made.begin(), made.end());
+        }
+
+        PatchComment c;
+        c.section = section_;
+        c.x = gridX_;
+        c.y = gridY_;
+        c.width = width_;
+        c.height = height_;
+        c.text = text_;
+        // Re-adding after an undo keeps the original id, so a redo of anything
+        // that referred to this note still finds it.
+        if (commentId_ > 0)
+        {
+            c.id = commentId_;
+            ctx_.patch.restoreComment(c);
+        }
+        else
+        {
+            commentId_ = ctx_.patch.addComment(c);
+        }
+        ctx_.repaint();
+        return true;
+    }
+
+    bool undo() override
+    {
+        ctx_.patch.removeCommentById(commentId_);
+        restorePushedModules(ctx_.patch, pushed_);
+        ctx_.repaint();
+        return true;
+    }
+
+    int getSizeInUnits() override { return 1; }
+    int getCommentId() const { return commentId_; }
+
+private:
+    UndoContext& ctx_;
+    int section_, gridX_, gridY_, width_, height_;
+    juce::String text_;
+    int commentId_ = 0;
+    std::vector<PushedModule> pushed_;
+};
+
+class DeleteCommentAction : public juce::UndoableAction
+{
+public:
+    DeleteCommentAction(UndoContext& ctx, int commentId) : ctx_(ctx)
+    {
+        if (auto* c = ctx_.patch.getCommentById(commentId))
+            stashed_ = *c;
+    }
+
+    bool perform() override
+    {
+        if (stashed_.id == 0) return false;
+        ctx_.patch.removeCommentById(stashed_.id);
+        ctx_.repaint();
+        return true;
+    }
+
+    bool undo() override
+    {
+        if (stashed_.id == 0) return false;
+        ctx_.patch.restoreComment(stashed_);
+        ctx_.repaint();
+        return true;
+    }
+
+    int getSizeInUnits() override { return 1; }
+
+private:
+    UndoContext& ctx_;
+    PatchComment stashed_;
+};
+
+class MoveCommentAction : public juce::UndoableAction
+{
+public:
+    MoveCommentAction(UndoContext& ctx, int commentId,
+                      juce::Point<int> oldPos, juce::Point<int> newPos)
+        : ctx_(ctx), commentId_(commentId), oldPos_(oldPos), newPos_(newPos) {}
+
+    bool perform() override { return apply(newPos_); }
+    bool undo()    override { return apply(oldPos_); }
+    int getSizeInUnits() override { return 1; }
+
+private:
+    bool apply(juce::Point<int> pos)
+    {
+        auto* c = ctx_.patch.getCommentById(commentId_);
+        if (!c) return false;
+        c->x = pos.x;
+        c->y = pos.y;
+        ctx_.repaint();
+        return true;
+    }
+
+    UndoContext& ctx_;
+    int commentId_;
+    juce::Point<int> oldPos_, newPos_;
+};
+
+class EditCommentTextAction : public juce::UndoableAction
+{
+public:
+    EditCommentTextAction(UndoContext& ctx, int commentId,
+                          const juce::String& oldText, const juce::String& newText)
+        : ctx_(ctx), commentId_(commentId), oldText_(oldText), newText_(newText) {}
+
+    bool perform() override { return apply(newText_); }
+    bool undo()    override { return apply(oldText_); }
+    int getSizeInUnits() override { return 1; }
+
+private:
+    bool apply(const juce::String& text)
+    {
+        auto* c = ctx_.patch.getCommentById(commentId_);
+        if (!c) return false;
+        c->text = text;
+        ctx_.repaint();
+        return true;
+    }
+
+    UndoContext& ctx_;
+    int commentId_;
+    juce::String oldText_, newText_;
+};
+
+// Dragging a corner can move the note's left edge as well as its size, so the
+// whole rectangle travels together and the gesture undoes in one step. The
+// rectangle is in grid units: (column, row, columns, rows).
+class ResizeCommentAction : public juce::UndoableAction
+{
+public:
+    ResizeCommentAction(UndoContext& ctx, int commentId,
+                        juce::Rectangle<int> oldRect, juce::Rectangle<int> newRect)
+        : ctx_(ctx), commentId_(commentId), oldRect_(oldRect), newRect_(newRect) {}
+
+    bool perform() override
+    {
+        // A note that just grew makes room the way a dropped module does, and
+        // is refused the same way when a column cannot absorb it (issue #54).
+        for (int col = 0; col < newRect_.getWidth(); ++col)
+            if (!canMakeRoomForModule(ctx_.patch.getContainer(sectionOf()), sectionOf(),
+                                      newRect_.getX() + col, newRect_.getY(),
+                                      newRect_.getHeight(), {},
+                                      &ctx_.patch.getComments(), commentId_))
+                return false;
+
+        if (!apply(newRect_))
+            return false;
+
+        pushed_.clear();
+        for (int col = 0; col < newRect_.getWidth(); ++col)
+        {
+            auto made = makeRoomForModule(ctx_.patch.getContainer(sectionOf()), sectionOf(),
+                                          newRect_.getX() + col, newRect_.getY(),
+                                          newRect_.getHeight(), {},
+                                          &ctx_.patch.getComments(), commentId_);
+            pushed_.insert(pushed_.end(), made.begin(), made.end());
+        }
+        ctx_.repaint();
+        return true;
+    }
+
+    bool undo() override
+    {
+        if (!apply(oldRect_))
+            return false;
+        restorePushedModules(ctx_.patch, pushed_);
+        pushed_.clear();
+        ctx_.repaint();
+        return true;
+    }
+
+    int getSizeInUnits() override { return 1; }
+
+private:
+    int sectionOf() const
+    {
+        auto* c = ctx_.patch.getCommentById(commentId_);
+        return c != nullptr ? c->section : 1;
+    }
+
+    bool apply(juce::Rectangle<int> r)
+    {
+        auto* c = ctx_.patch.getCommentById(commentId_);
+        if (!c) return false;
+        c->x      = juce::jlimit(0, 39, r.getX());
+        c->y      = juce::jmax(0, r.getY());
+        c->width  = juce::jlimit(1, 40 - c->x, r.getWidth());
+        c->height = juce::jlimit(1, 64, r.getHeight());
+        ctx_.repaint();
+        return true;
+    }
+
+    UndoContext& ctx_;
+    int commentId_;
+    juce::Rectangle<int> oldRect_, newRect_;
+    std::vector<PushedModule> pushed_;
 };
 
 // ============================================================================
@@ -482,8 +798,9 @@ public:
         auto* param = mod->getParameter(paramId_);
         if (!param) return false;
         param->setValue(newValue_);
-        ctx_.connMgr.sendParameter(section_, moduleId_, paramId_, newValue_);
-        ctx_.repaint();
+        ctx_.connMgr.sendParameter(ctx_.slot, section_, moduleId_, paramId_, newValue_);
+        if (ctx_.onParamEdited) ctx_.onParamEdited(section_, moduleId_, paramId_, newValue_);
+        redraw();
         return true;
     }
 
@@ -495,8 +812,9 @@ public:
         auto* param = mod->getParameter(paramId_);
         if (!param) return false;
         param->setValue(oldValue_);
-        ctx_.connMgr.sendParameter(section_, moduleId_, paramId_, oldValue_);
-        ctx_.repaint();
+        ctx_.connMgr.sendParameter(ctx_.slot, section_, moduleId_, paramId_, oldValue_);
+        if (ctx_.onParamEdited) ctx_.onParamEdited(section_, moduleId_, paramId_, oldValue_);
+        redraw();
         return true;
     }
 
@@ -518,6 +836,65 @@ public:
     int getSizeInUnits() override { return 1; }
 
 private:
+    // Values-only redraw where the context offers one, so a single click does
+    // not drag a morph-list rebuild and a DSP recount behind it (issue #37).
+    void redraw() const
+    {
+        if (ctx_.repaintValues) ctx_.repaintValues();
+        else if (ctx_.repaint)  ctx_.repaint();
+    }
+
+    UndoContext& ctx_;
+    int section_, moduleId_, paramId_;
+    int oldValue_, newValue_;
+};
+
+// ============================================================================
+// CustomParameterChangeAction — a UI-only parameter, never sent to the synth
+// ============================================================================
+//
+// modules.xml marks a handful of parameters class="custom" role="ui": the
+// frequency display units, the note sequencer's zoom and scroll position. They
+// are stored in the patch, in its CustomDump sections, but they mean nothing to
+// the synth and must never be sent to it — their index counts from zero
+// alongside the real parameters, so a ParameterChange carrying one would land
+// on a completely different control (the sequencer's first note, an
+// oscillator's coarse tune).
+class CustomParameterChangeAction : public juce::UndoableAction
+{
+public:
+    CustomParameterChangeAction(UndoContext& ctx, int section, int moduleId,
+                                int paramId, int oldValue, int newValue)
+        : ctx_(ctx), section_(section), moduleId_(moduleId),
+          paramId_(paramId), oldValue_(oldValue), newValue_(newValue) {}
+
+    bool perform() override { return apply(newValue_); }
+    bool undo() override    { return apply(oldValue_); }
+
+    int getSizeInUnits() override { return 1; }
+
+private:
+    bool apply(int value)
+    {
+        auto& container = ctx_.patch.getContainer(section_);
+        auto* mod = container.getModuleByIndex(moduleId_);
+        if (!mod) return false;
+
+        // Custom parameters share the index space with the ordinary ones, so
+        // they have to be matched on class as well as index.
+        for (auto& p : mod->getParameters())
+        {
+            const auto* pd = p.getDescriptor();
+            if (pd == nullptr || pd->paramClass != "custom" || pd->index != paramId_)
+                continue;
+            p.setValue(value);
+            if (ctx_.repaintValues) ctx_.repaintValues();
+            else if (ctx_.repaint)  ctx_.repaint();
+            return true;
+        }
+        return false;
+    }
+
     UndoContext& ctx_;
     int section_, moduleId_, paramId_;
     int oldValue_, newValue_;
@@ -568,8 +945,8 @@ private:
 
             if (ctx_.connMgr.isConnected())
             {
-                int pid = ctx_.connMgr.getCurrentPatchId();
-                int slot = ctx_.connMgr.getCurrentSlot();
+                int pid = ctx_.connMgr.getPatchId(ctx_.slot);
+                int slot = ctx_.slot;
                 MorphAssignmentMessage msg(pid, section_, moduleId_, paramId_, group);
                 ctx_.connMgr.sendRawSysEx(msg.toSysEx(slot));
                 MorphRangeChangeMessage rangeMsg(pid, section_, moduleId_, paramId_,
@@ -625,8 +1002,8 @@ private:
                 ma.range = signedRange;
                 if (ctx_.connMgr.isConnected())
                 {
-                    int pid = ctx_.connMgr.getCurrentPatchId();
-                    int slot = ctx_.connMgr.getCurrentSlot();
+                    int pid = ctx_.connMgr.getPatchId(ctx_.slot);
+                    int slot = ctx_.slot;
                     int span = std::abs(signedRange);
                     int dir = signedRange < 0 ? 1 : 0;
                     MorphRangeChangeMessage msg(pid, section_, moduleId_, paramId_, span, dir);
@@ -663,8 +1040,8 @@ public:
 private:
     bool applyKnob(int targetKnob, int fromKnob)
     {
-        int pid = ctx_.connMgr.getCurrentPatchId();
-        int slot = ctx_.connMgr.getCurrentSlot();
+        int pid = ctx_.connMgr.getPatchId(ctx_.slot);
+        int slot = ctx_.slot;
 
         if (fromKnob >= 0)
             ctx_.patch.knobAssignments[static_cast<size_t>(fromKnob)].assigned = false;
@@ -716,8 +1093,8 @@ public:
 private:
     bool applyCC(int targetCC, int fromCC)
     {
-        int pid = ctx_.connMgr.getCurrentPatchId();
-        int slot = ctx_.connMgr.getCurrentSlot();
+        int pid = ctx_.connMgr.getPatchId(ctx_.slot);
+        int slot = ctx_.slot;
         auto& ctrls = ctx_.patch.ctrlAssignments;
 
         // Remove old
@@ -771,7 +1148,7 @@ public:
     bool perform() override
     {
         ctx_.patch.setName(newName_);
-        ctx_.connMgr.sendPatchTitle(newName_);
+        ctx_.connMgr.sendPatchTitle(ctx_.slot, newName_);
         ctx_.repaint();
         return true;
     }
@@ -779,7 +1156,7 @@ public:
     bool undo() override
     {
         ctx_.patch.setName(oldName_);
-        ctx_.connMgr.sendPatchTitle(oldName_);
+        ctx_.connMgr.sendPatchTitle(ctx_.slot, oldName_);
         ctx_.repaint();
         return true;
     }
@@ -818,24 +1195,6 @@ public:
 
     int getSizeInUnits() override { return static_cast<int>(changes_.size()); }
 
-    /** Throttled async send of parameter changes to synth (4 per 20ms) */
-    static void sendBatch(std::shared_ptr<std::vector<ParamChange>> params,
-                          std::shared_ptr<size_t> pos,
-                          ConnectionManager& cm)
-    {
-        for (int i = 0; i < 4 && *pos < params->size(); ++i, ++(*pos))
-        {
-            auto& c = (*params)[*pos];
-            cm.sendParameter(c.section, c.moduleId, c.paramId, c.newValue);
-        }
-        if (*pos < params->size())
-        {
-            juce::Timer::callAfterDelay(20, [params, pos, &cm]() {
-                sendBatch(params, pos, cm);
-            });
-        }
-    }
-
 private:
     void applyValues(bool forward)
     {
@@ -851,20 +1210,186 @@ private:
         }
         ctx_.repaint();
 
-        // 2. Send parameter changes to synth with throttled batches
-        //    using callAfterDelay chain (no self-deleting timer).
+        // 2. Hand the changes to the connection's coalesced, throttled queue.
+        //    One shared queue across all snapshot applies means rapid Mutator
+        //    auditions on large patches can never overlap and flood the synth.
         if (!ctx_.connMgr.isConnected()) return;
 
-        auto pending = std::make_shared<std::vector<ParamChange>>(changes_);
-        if (!forward) {
-            for (auto& c : *pending)
-                c.newValue = c.oldValue;
-        }
-
-        auto idx = std::make_shared<size_t>(0);
-        sendBatch(pending, idx, ctx_.connMgr);
+        for (auto& c : changes_)
+            ctx_.connMgr.queueParameter(ctx_.slot, c.section, c.moduleId, c.paramId,
+                                        forward ? c.newValue : c.oldValue);
     }
 
     UndoContext& ctx_;
     std::vector<ParamChange> changes_;
+};
+
+// ============================================================================
+// InsertSnippetAction
+// ============================================================================
+class InsertSnippetAction : public juce::UndoableAction
+{
+public:
+    /** `targetSection` of -1 keeps every module in the area it was saved from,
+        which is what importing a snippet file wants. Naming an area instead
+        drops the whole block there, which is how pasting can cross between poly
+        and common (issue #42). */
+    InsertSnippetAction(UndoContext& ctx, SnipData snip, int offsetX, int offsetY,
+                        int targetSection = -1)
+        : ctx_(ctx), snip_(std::move(snip)), offsetX_(offsetX), offsetY_(offsetY),
+          targetSection_(targetSection) {}
+
+    bool perform() override
+    {
+        createdIndices_.clear();
+        pushed_.clear();
+        bool createdAny = false;
+
+        // Modules this insert has already placed keep their spot, so the block
+        // arrives with the shape it was copied with and pushes the patch around
+        // it out of the way rather than shuffling within itself.
+        std::vector<int> ownIndices[2];
+
+        for (auto& entry : snip_.entries)
+        {
+            const int section = (targetSection_ >= 0) ? targetSection_ : entry.section;
+
+            if (isSnippetExcludedModuleType(entry.typeIndex))
+            {
+                createdIndices_.push_back({ section, -1 });
+                continue;
+            }
+
+            auto& container = ctx_.patch.getContainer(section);
+            int tx = entry.gridPos.x + offsetX_;
+            int ty = entry.gridPos.y + offsetY_;
+            tx = juce::jlimit(0, 39, tx);
+            ty = juce::jlimit(0, modulePlacementRows - 1, ty);
+
+            auto* desc = ctx_.descs.getModuleByIndex(entry.typeIndex);
+            if (!desc || !container.canAdd(*desc))
+            {
+                createdIndices_.push_back({ section, -1 });
+                continue;
+            }
+
+            auto module = Module::createFromDescriptor(*desc);
+            if (!module)
+            {
+                createdIndices_.push_back({ section, -1 });
+                continue;
+            }
+
+            const int newIndex = nextContainerIndex(container);
+            if (newIndex < 0)
+            {
+                createdIndices_.push_back({ section, -1 });
+                continue;
+            }
+
+            // A column with no room left refuses the whole insert: burying
+            // whatever sits at the bottom is how pasting a block used to end
+            // up stacked on the patch (issue #54). undo() knows how to take
+            // back what this insert has done so far, so it rolls the block
+            // back rather than leaving half of it placed.
+            if (!canMakeRoomForModule(container, section, tx, ty, desc->height,
+                                      ownIndices[section == 1 ? 1 : 0],
+                                      &ctx_.patch.getComments()))
+            {
+                undo();
+                createdIndices_.clear();
+                pushed_.clear();
+                return false;
+            }
+
+            auto roomMade = makeRoomForModule(container, section, tx, ty, desc->height,
+                                              ownIndices[section == 1 ? 1 : 0],
+                                              &ctx_.patch.getComments());
+            pushed_.insert(pushed_.end(), roomMade.begin(), roomMade.end());
+
+            module->setContainerIndex(newIndex);
+            module->setPosition({ tx, ty });
+            module->setTitle(entry.name.isNotEmpty() ? entry.name : desc->name);
+
+            auto& params = module->getParameters();
+            for (size_t i = 0; i < entry.paramValues.size() && i < params.size(); ++i)
+                params[i].setValue(entry.paramValues[i]);
+
+            auto* mod = container.addModule(std::move(module));
+            createdIndices_.push_back({ section, mod->getContainerIndex() });
+            ownIndices[section == 1 ? 1 : 0].push_back(mod->getContainerIndex());
+            createdAny = true;
+        }
+
+        // Let the normal synchronizer send the same ordered edit stream as the
+        // original Java editor: all modules first, then cables. Avoiding a full
+        // patch upload here keeps snippet insertion from locking the synth.
+        for (auto& cb : snip_.cables)
+        {
+            if (cb.srcIdx < 0 || cb.srcIdx >= (int)createdIndices_.size()) continue;
+            if (cb.dstIdx < 0 || cb.dstIdx >= (int)createdIndices_.size()) continue;
+            auto [srcSec, srcCI] = createdIndices_[static_cast<size_t>(cb.srcIdx)];
+            auto [dstSec, dstCI] = createdIndices_[static_cast<size_t>(cb.dstIdx)];
+            if (srcCI < 0 || dstCI < 0 || srcSec != dstSec) continue;
+
+            auto& container = ctx_.patch.getContainer(srcSec);
+            auto* src = container.getModuleByIndex(srcCI);
+            auto* dst = container.getModuleByIndex(dstCI);
+            if (!src || !dst) continue;
+            auto* sc = src->getConnector(cb.srcConn, cb.srcIsOutput);
+            auto* dc = dst->getConnector(cb.dstConn, cb.dstIsOutput);
+            if (sc && dc) container.addConnection(sc, dc);
+        }
+
+        ctx_.repaint();
+        return createdAny;
+    }
+
+    bool undo() override
+    {
+        for (auto it = createdIndices_.rbegin(); it != createdIndices_.rend(); ++it)
+        {
+            auto [sec, cidx] = *it;
+            if (cidx < 0) continue;
+            auto& container = ctx_.patch.getContainer(sec);
+            auto* mod = container.getModuleByIndex(cidx);
+            if (mod)
+                container.removeModule(mod);
+        }
+        restorePushedModules(ctx_.patch, pushed_);
+        ctx_.repaint();
+        return true;
+    }
+
+    int getSizeInUnits() override { return (int)snip_.entries.size(); }
+
+    /** {section, containerIndex} per snippet entry, -1 where nothing was
+        created. Valid after perform(); lets the caller select what it inserted. */
+    const std::vector<std::pair<int, int>>& getCreatedIndices() const { return createdIndices_; }
+
+private:
+    UndoContext& ctx_;
+    SnipData snip_;
+    int offsetX_, offsetY_;
+    int targetSection_;
+    std::vector<std::pair<int, int>> createdIndices_;  // {section, containerIndex}
+    std::vector<PushedModule> pushed_;
+
+    // Indices are serialized in seven bits, so counting up from the highest one
+    // in use overflows after enough add/delete cycles. Reuse the lowest free
+    // index instead, which is what Patch::createModule does.
+    static int nextContainerIndex(const ModuleContainer& container)
+    {
+        std::array<bool, 128> used {};
+        for (auto& m : container.getModules())
+        {
+            const int index = m->getContainerIndex();
+            if (index >= 1 && index <= 127)
+                used[static_cast<size_t>(index)] = true;
+        }
+        for (int index = 1; index <= 127; ++index)
+            if (!used[static_cast<size_t>(index)])
+                return index;
+        return -1;   // full: nothing can be inserted here
+    }
 };

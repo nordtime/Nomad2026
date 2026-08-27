@@ -12,6 +12,28 @@ int PatchSerializer::bitWidth(int maxValue)
     return bits;
 }
 
+static int pdlBitWidth(int maxValue)
+{
+    if (maxValue <= 0) return 1;
+    int bits = 0, v = maxValue;
+    while (v > 0) { bits++; v >>= 1; }
+    return bits;
+}
+
+static int parameterBitWidth(const Module& module, const ParameterDescriptor& pd)
+{
+    // PDL2 Param97 stores MasterOsc.kbt as 7 bits even though modules.xml
+    // describes the UI range as Off/On. Using the UI maxValue here misaligns
+    // every following parameter in the dump and the synth rejects the patch.
+    if (module.getDescriptor() != nullptr
+        && module.getDescriptor()->index == 97
+        && pd.index == 2
+        && pd.paramClass == "parameter")
+        return 7;
+
+    return pdlBitWidth(pd.maxValue);
+}
+
 int PatchSerializer::findModuleContainerIndex(const ModuleContainer& container, const Connector* conn) const
 {
     for (const auto& m : container.getModules())
@@ -89,7 +111,7 @@ std::vector<uint8_t> PatchSerializer::serializePatchName(const Patch& patch)
     bs.writeBits(0, 8);   // padding
     bs.writeString16(patch.getName().toStdString());
     bs.alignToByte();
-    return bs.toMidiBytes();
+    return bs.toBytes();
 }
 
 // Header (type 33) + PatchName2 (type 39) combined — for legacy 13-section download format
@@ -130,7 +152,7 @@ std::vector<uint8_t> PatchSerializer::serializeHeaderAndName(const Patch& patch)
     bs.writeString16(patch.getName().toStdString());
     bs.alignToByte();
 
-    return bs.toMidiBytes();
+    return bs.toBytes();
 }
 
 // Header (type 33) — standalone section for upload
@@ -147,9 +169,9 @@ std::vector<uint8_t> PatchSerializer::serializeHeader(const Patch& patch)
     bs.writeBits(h.bendRange, 5);
     bs.writeBits(h.portamentoTime, 7);
     bs.writeBits(h.portamento ? 1 : 0, 1);
-    bs.writeBits(h.pedalMode, 1);
-    bs.writeBits(h.voices - 1, 5);  // 0-based
-    bs.writeBits(h.unknown2, 2);
+    bs.writeBits(1, 1);                    // pedalMode: Java always sends 1
+    bs.writeBits(h.voices - 1, 5);        // 0-based
+    bs.writeBits(0, 2);                    // unknown2: Java always sends 0
     bs.writeBits(h.separatorPosition, 12);
     bs.writeBits(h.octaveShift, 3);
     bs.writeBits(h.cableVisRed ? 1 : 0, 1);
@@ -161,11 +183,11 @@ std::vector<uint8_t> PatchSerializer::serializeHeader(const Patch& patch)
     bs.writeBits(h.cableVisWhite ? 1 : 0, 1);
     bs.writeBits(h.voiceRetriggerCommon, 1);
     bs.writeBits(h.voiceRetriggerPoly, 1);
-    bs.writeBits(h.unknown3, 4);
-    bs.writeBits(h.unknown4, 3);
+    bs.writeBits(0xF, 4);                  // unknown3: Java always sends 0xF
+    bs.writeBits(0, 3);                    // unknown4: Java always sends 0
     bs.alignToByte();
 
-    return bs.toMidiBytes();
+    return bs.toBytes();
 }
 
 // ModuleDump (type 74): section:1 nmodules:7 [type:7 index:7 xpos:7 ypos:7]*nmodules
@@ -189,7 +211,7 @@ std::vector<uint8_t> PatchSerializer::serializeModuleDump(const Patch& patch, in
     }
 
     bs.alignToByte();
-    return bs.toMidiBytes();
+    return bs.toBytes();
 }
 
 // CableDump (type 82): section:1 ncables:15 [color:3 src:7 srcConn:6 isOutput:1 dst:7 dstConn:6]*ncables
@@ -222,13 +244,15 @@ std::vector<uint8_t> PatchSerializer::serializeCableDump(const Patch& patch, int
         bs.writeBits(color, 3);
         bs.writeBits(srcModule, 7);
         bs.writeBits(srcConnIdx, 6);
-        bs.writeBits(1, 1);         // isOutput = 1 (source is always output)
+        // Source type bit: 0 when the source end is a chained input
+        // (input→input cable); the destination is always an input.
+        bs.writeBits(conn.output->getDescriptor()->isOutput ? 1 : 0, 1);
         bs.writeBits(dstModule, 7);
         bs.writeBits(dstConnIdx, 6);
     }
 
     bs.alignToByte();
-    return bs.toMidiBytes();
+    return bs.toBytes();
 }
 
 // ParameterDump (type 77): section:1 nmodules:7 [index:7 type:7 params...]*nmodules
@@ -267,7 +291,7 @@ std::vector<uint8_t> PatchSerializer::serializeParameterDump(const Patch& patch,
             if (pd.paramClass != "parameter")
                 continue;
 
-            int bits = bitWidth(pd.maxValue);
+            int bits = parameterBitWidth(*m, pd);
             const auto* param = m->getParameter(pd.index);
             int value = param ? param->getValue() : pd.defaultValue;
             bs.writeBits(value, bits);
@@ -275,7 +299,7 @@ std::vector<uint8_t> PatchSerializer::serializeParameterDump(const Patch& patch,
     }
 
     bs.alignToByte();
-    return bs.toMidiBytes();
+    return bs.toBytes();
 }
 
 // MorphMap (type 101): morph[4]:7 keyboard[4]:2 nknobs:5 [section:1 module:7 param:7 morph:2 range:8]*nknobs
@@ -305,7 +329,7 @@ std::vector<uint8_t> PatchSerializer::serializeMorphMap(const Patch& patch)
     }
 
     bs.alignToByte();
-    return bs.toMidiBytes();
+    return bs.toBytes();
 }
 
 // KnobMap (type 98): 23 * [assigned:1 assigned*(section:2 module:7 param:7)]
@@ -331,7 +355,7 @@ std::vector<uint8_t> PatchSerializer::serializeKnobMap(const Patch& patch)
     }
 
     bs.alignToByte();
-    return bs.toMidiBytes();
+    return bs.toBytes();
 }
 
 // ControlMap (type 96): ncontrols:7 [control:7 section:2 module:7 param:7]*ncontrols
@@ -350,7 +374,7 @@ std::vector<uint8_t> PatchSerializer::serializeControlMap(const Patch& patch)
     }
 
     bs.alignToByte();
-    return bs.toMidiBytes();
+    return bs.toBytes();
 }
 
 // CustomDump (type 91): section:1 nmodules:7 [index:7 nparams:8 value:8*nparams]*nmodules
@@ -403,7 +427,7 @@ std::vector<uint8_t> PatchSerializer::serializeCustomDump(const Patch& patch, in
     }
 
     bs.alignToByte();
-    return bs.toMidiBytes();
+    return bs.toBytes();
 }
 
 // NameDump (type 90): section:1 nmodules:7 [index:8 String$name]*nmodules
@@ -425,7 +449,7 @@ std::vector<uint8_t> PatchSerializer::serializeNameDump(const Patch& patch, int 
     }
 
     bs.alignToByte();
-    return bs.toMidiBytes();
+    return bs.toBytes();
 }
 
 // NoteDump (type 105): note1(21bits) nmore:5 note2(21bits) nmore*note(21bits)
@@ -466,5 +490,5 @@ std::vector<uint8_t> PatchSerializer::serializeNoteDump(const Patch& patch)
     }
 
     bs.alignToByte();
-    return bs.toMidiBytes();
+    return bs.toBytes();
 }

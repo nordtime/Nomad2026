@@ -1,68 +1,75 @@
 #pragma once
+
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "../model/SynthSettings.h"
+#include "FlatCloseButton.h"
 
 class SynthSettingsDialog : public juce::Component
 {
 public:
-    struct Result
-    {
-        juce::String synthName = "Nord Modular";
-        int midiChannel1 = 1;
-        int midiChannel2 = 2;
-        int midiChannel3 = 3;
-        int midiChannel4 = 4;
-        int globalChannel = 16;
-        int clockSource = 0; // 0 = Internal, 1 = External
-        int masterTune = 0; // cents
-        int knobMode = 0; // 0 = Normal, 1 = Hook
-        int pedalPolarity = 0; // 0 = Normal, 1 = Inverted
-    };
+    using Callback = std::function<void(const SynthSettings&)>;
 
-    SynthSettingsDialog(const Result& initialSettings, std::function<void(const Result&)> onApply);
-    
-    void resized() override;
-    void paint(juce::Graphics& g) override;
+    SynthSettingsDialog (const SynthSettings& current, Callback onOk);
 
-    static void show(juce::Component* parent, const Result& initialSettings, std::function<void(const Result&)> onApply);
+    void setSettings (const SynthSettings& settings);
+    void paint   (juce::Graphics& g) override;
+    void resized () override;
+    bool keyPressed (const juce::KeyPress& key) override;
+    void mouseDown  (const juce::MouseEvent& e) override;
+    void mouseDrag  (const juce::MouseEvent& e) override;
+
+    static SynthSettingsDialog* show (juce::Component* parent, const SynthSettings& current, Callback onOk);
 
 private:
-    Result currentSettings;
-    std::function<void(const Result&)> onApplyCallback;
+    void close();
+    void updateMasterTuneLabel();
 
-    juce::Label nameLabel { {}, "Synth Name:" };
+    Callback okCallback;
+    juce::ComponentDragger dragger;
+    FlatCloseButton closeButton;
+    SynthSettings working;
+
+    // ── Synth ──
+    juce::Label  synthHdr     { {}, "SYNTH" };
+    juce::Label  nameLbl      { {}, "Name" };
     juce::TextEditor nameEditor;
+    juce::Label  tuneLbl      { {}, "Master Tune" };
+    juce::Slider masterTuneSlider;
+    juce::Label  tuneCentsLbl;
 
-    juce::Label midiCh1Label { {}, "Slot A MIDI Ch:" };
-    juce::ComboBox midiCh1Combo;
+    // ── MIDI channels per slot ──
+    juce::Label  chanHdr      { {}, "MIDI CHANNELS PER SLOT" };
+    juce::Label  slotLbls[4];
+    juce::Slider chanSliders[4];
 
-    juce::Label midiCh2Label { {}, "Slot B MIDI Ch:" };
-    juce::ComboBox midiCh2Combo;
+    // ── MIDI ──
+    juce::Label  midiHdr      { {}, "MIDI" };
+    juce::Label  velScaleLbl  { {}, "Velocity scale" };
+    juce::Label  velMinTag    { {}, "Min" },  velMaxTag { {}, "Max" };
+    juce::Slider velMinSlider, velMaxSlider;
+    juce::ToggleButton localOnTgl    { "Local On" };
+    juce::ToggleButton ledsActiveTgl { "LEDs Active" };
+    juce::ToggleButton pgmRecvTgl    { "Pgm Recv" };
+    juce::ToggleButton pgmSendTgl    { "Pgm Send" };
 
-    juce::Label midiCh3Label { {}, "Slot C MIDI Ch:" };
-    juce::ComboBox midiCh3Combo;
+    // ── Clock ──
+    juce::Label  clockHdr     { {}, "CLOCK" };
+    juce::ToggleButton clockInt { "Internal" }, clockExt { "External" };
+    juce::Label  bpmLbl       { {}, "BPM" };
+    juce::Slider bpmSlider;
+    juce::ToggleButton globalSyncTgl { "Global Sync" };
 
-    juce::Label midiCh4Label { {}, "Slot D MIDI Ch:" };
-    juce::ComboBox midiCh4Combo;
+    // ── Behavior ──
+    juce::Label  behavHdr     { {}, "BEHAVIOR" };
+    juce::Label  knobModeLbl  { {}, "Knob mode" };
+    juce::ToggleButton knobImm { "Immediate" }, knobHook { "Hook" };
+    juce::Label  pedalLbl     { {}, "Pedal polarity" };
+    juce::ToggleButton pedalNorm { "Normal" }, pedalInv { "Inverted" };
+    juce::Label  kbModeLbl    { {}, "Keyboard mode" };
+    juce::ToggleButton kbActive { "Active slot" }, kbSelected { "Selected slots" };
 
-    juce::Label globalChLabel { {}, "Global MIDI Ch:" };
-    juce::ComboBox globalChCombo;
-
-    juce::Label clockLabel { {}, "Clock Source:" };
-    juce::ComboBox clockCombo;
-
-    juce::Label tuneLabel { {}, "Master Tune (cents):" };
-    juce::Slider tuneSlider;
-
-    juce::Label knobModeLabel { {}, "Knob Mode:" };
-    juce::ComboBox knobModeCombo;
-
-    juce::Label pedalLabel { {}, "Pedal Polarity:" };
-    juce::ComboBox pedalCombo;
-    
-    juce::TextButton okButton { "OK" };
-    juce::TextButton cancelButton { "Cancel" };
-
-    void saveAndClose();
+    // ── Buttons ──
+    juce::TextButton okButton { "OK" }, cancelButton { "Cancel" };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SynthSettingsDialog)
 };
