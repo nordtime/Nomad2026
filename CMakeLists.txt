@@ -57,8 +57,8 @@ option(NME_BUILD_TESTS "Build the unit tests (tests/, ctest)" ON)
 option(NME_MCP_BRIDGE "Build embedded MCP control-socket bridge (localhost-only, lets an MCP client add/connect modules in the live editor)" ON)
 
 if(NME_BUILD_PLUGIN)
-    set(CLAP_JUCE_EXTENSIONS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    add_subdirectory(libs/clap-juce-extensions)
+    # set(CLAP_JUCE_EXTENSIONS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    # add_subdirectory(libs/clap-juce-extensions)
 endif()
 
 # --- Shared source files (used by both standalone and plugin) ---
@@ -230,12 +230,12 @@ if(NME_BUILD_PLUGIN)
         ${NME_SHARED_SOURCES}
     )
 
-    clap_juce_extensions_plugin(
-        TARGET AnimatekNMEPlugin
-        CLAP_ID "com.animatek.nme"
-        CLAP_FEATURES "note-effect" "utility"
-        CLAP_PROCESS_EVENTS_RESOLUTION_SAMPLES 0
-    )
+    # clap_juce_extensions_plugin(
+    #     TARGET AnimatekNMEPlugin
+    #     CLAP_ID "com.animatek.nme"
+    #     CLAP_FEATURES "note-effect" "utility"
+    #     CLAP_PROCESS_EVENTS_RESOLUTION_SAMPLES 0
+    # )
 endif()
 
 juce_add_binary_data(NmeData SOURCES
