@@ -111,7 +111,6 @@ public:
     }
 
     int getSizeInUnits() override { return 1; }
-    int getContainerIndex() const { return containerIndex_; }
 
     // containerIndex assigned by createModule(), valid after a successful
     // perform() - lets callers that don't already hold the Module* (e.g. the
