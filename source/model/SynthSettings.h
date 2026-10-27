@@ -7,7 +7,10 @@
 struct SynthSettings
 {
     // Core (always present)
-    int  midiClockSource     = 0;    // 1 bit  (0=internal, 1=external)
+    // 1 bit: 1 = internal, 0 = external (waits for MIDI clock). Checked on a real G1 set to
+    // Internal, which reports 1, and in G1-Emu, whose OS starts its internal clock only on 1.
+    // Use clockIsInternal()/setClockInternal() rather than comparing the raw bit.
+    int  midiClockSource     = 1;
     int  midiVelScaleMin     = 0;    // 7 bits (0-127)
     int  ledsActive          = 1;    // 1 bit
     int  midiVelScaleMax     = 127;  // 7 bits (0-127)
@@ -15,8 +18,13 @@ struct SynthSettings
     int  localOn             = 1;    // 1 bit
     int  keyboardMode        = 0;    // 1 bit  (0=Active slot, 1=Selected slots)
     int  pedalPolarity       = 0;    // 1 bit
-    int  globalSync          = 0;    // 5 bits
-    int  masterTune          = 64;   // 8 bits (raw, 64=center)
+    // 5 bits: the quarter notes between the Sync pulses of the MIDI Global module, less
+    // one (0 = 1 quarter note, 31 = 32), as the G1's own GLOBAL SYNC page counts them.
+    // Use globalSyncQuarters().
+    int  globalSync          = 0;
+    // 8 bits, a signed byte: 0 = in tune, one step per cent, -127..127 (as nmedit's
+    // editor reads it). A real G1 at 0 on its own display sends 0. Use masterTuneCents().
+    int  masterTune          = 0;
     int  programChangeReceive= 1;    // 1 bit
     int  programChangeSend   = 1;    // 1 bit
     int  knobMode            = 0;    // 1 bit  (0=Immediate, 1=Hook)
@@ -29,4 +37,13 @@ struct SynthSettings
     int  slotSelected[4]     = {1, 0, 0, 0};   // 1 bit each
     int  activeSlot          = 0;              // 2 bits
     int  slotVoiceCount[4]   = {4, 4, 4, 4};   // 8 bits each
+
+    bool clockIsInternal() const        { return midiClockSource != 0; }
+    void setClockInternal(bool internal) { midiClockSource = internal ? 1 : 0; }
+
+    int  masterTuneCents() const          { return static_cast<signed char> (masterTune & 0xff); }
+    void setMasterTuneCents(int cents)    { masterTune = (cents < -127 ? -127 : cents > 127 ? 127 : cents) & 0xff; }
+
+    int  globalSyncQuarters() const       { return (globalSync & 0x1f) + 1; }
+    void setGlobalSyncQuarters(int q)     { globalSync = (q < 1 ? 1 : q > 32 ? 32 : q) - 1; }
 };

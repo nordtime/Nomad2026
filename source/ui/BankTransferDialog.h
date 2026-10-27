@@ -1,5 +1,7 @@
 #pragma once
 
+#include "AppTheme.h"
+
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "FlatCloseButton.h"
 #include "../sync/BankTransferManager.h"
@@ -20,6 +22,7 @@ public:
                        const juce::File& fixedFolder = {});
 
     void paint(juce::Graphics& g) override;
+    void paintOverChildren (juce::Graphics& g) override { AppTheme::drawWindowFrame (g, getLocalBounds()); }
     void resized() override;
     bool keyPressed(const juce::KeyPress& key) override;
     void mouseDown(const juce::MouseEvent& e) override;
@@ -45,8 +48,6 @@ private:
 
     juce::Label    bankLabel   { {}, "BANK" };
     juce::ComboBox bankCombo;
-    juce::Label    slotLabel   { {}, "TEMP SLOT" };
-    juce::ComboBox slotCombo;
     juce::Label    folderLabel { {}, "FOLDER" };
     juce::Label    folderField;
     juce::TextButton browseButton { "Browse..." };
@@ -61,7 +62,9 @@ private:
 
     juce::File chosenFolder;
     juce::File fixedFolder_;                // BackupAllBanks: locked destination
-    juce::Array<juce::File> scannedFiles;   // SendToSynth: .pch files found
+    std::vector<BankTransferManager::SendItem> sendItems;   // SendToSynth: what goes where
+    juce::StringArray sendProblems;                         // files that cannot go
+    juce::File sendList;                                    // the .pchList giving positions, if any
     bool running = false;
     std::unique_ptr<juce::FileChooser> chooser;
 

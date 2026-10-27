@@ -36,6 +36,31 @@ Ponle a un módulo tu propio nombre desde su menú contextual, o desde el campo
 (`Ctrl+Z` lo revierte). El nombre vive dentro del patch y llega al sintetizador
 con la siguiente subida completa.
 
+## Reemplazar un módulo
+
+Para probar un FilterD donde tienes un FilterE, haz clic derecho en el módulo y
+abre **Replace with**. Salen los módulos de su misma familia, cada uno con su
+consumo de DSP y, si es el caso, cuántos cables perdería. El nuevo ocupa el
+sitio del viejo en un solo paso deshacible (`Ctrl+Z` devuelve el anterior tal
+como estaba).
+
+Qué se conserva:
+
+- **La posición**, y **el nombre** si le habías puesto uno.
+- **Los cables** en conectores que también tiene el módulo nuevo, emparejados
+  por nombre. Si los nombres no coinciden, un cable solo pasa cuando no hay
+  nada que elegir: un FilterD cableado desde su salida `lp` conserva ese cable
+  en la única `out` de un FilterE.
+- **Los valores** de los parámetros con el mismo nombre y rango, como la
+  resonancia.
+- **Las asignaciones** de knobs, morph y CC MIDI sobre esos parámetros.
+
+Lo demás se suelta en vez de adivinarse. El cable del `sync` de un OscA no acaba
+en la entrada de FM de un OscB solo porque las dos sean entradas de audio. La
+barra de estado dice cuántos cables y asignaciones se han perdido. Un módulo más
+alto empuja hacia abajo los de su columna; si no cabe, el reemplazo se rechaza y
+no cambia nada.
+
 ## Cables
 
 - **Crear**: arrastra de un conector a otro compatible. Los destinos válidos se
@@ -99,6 +124,24 @@ lo que sea. Viven en una carpeta **Presets** de tu librería, como un paquete
 `.pchp` por tipo de módulo; mira
 [Archivos y formatos](06-files-and-formats.md#pchp-presets-de-módulo).
 
+### Escalas del Key Quantizer
+
+El menú contextual del Key Quantizer tiene un submenú **Scale**. Arriba dice
+qué escala forman ahora sus interruptores de nota; debajo están **Chromatic** y
+una lista por tónica, de **C** a **B**. Elige **D > D Dorian** y los doce
+interruptores quedan puestos para esa escala. Los interruptores no dicen cuál
+es la tónica, así que salen marcadas todas las escalas con esas mismas notas:
+las teclas blancas son a la vez Do mayor, La menor natural y Re dórico. Si las
+notas no forman ninguna escala, pone **Custom notes**.
+
+Además de las escalas mayores y menores, los modos, las pentatónicas, las de
+blues y la de tonos enteros, hay frigia dominante (andaluza), doble armónica,
+menor húngara, napolitanas menor y mayor, hirajoshi, in-sen y las dos
+disminuidas.
+
+Elegir una escala cambia los interruptores uno a uno, así que `Ctrl+Z` la
+deshace interruptor a interruptor.
+
 ## Morphs
 
 Los cuatro grupos de morph de la cabecera funcionan como los del hardware:
@@ -112,8 +155,15 @@ en todo el patch y `F5` muestra el recorrido que barre cada parámetro con morph
 ## Randomize, initialize y bloqueos
 
 - `Ctrl+R` randomiza parámetros (uniforme); `Ctrl+Shift+R` usa una dispersión
-  gaussiana alrededor de los valores actuales.
-- Los parámetros bloqueados y los módulos excluidos no se tocan nunca.
+  gaussiana alrededor del centro del rango de cada parámetro. Si hay módulos
+  seleccionados, solo randomiza esos.
+- **Excluir módulos.** Haz clic derecho en un módulo y marca **Exclude from
+  Random & Mutation**, o selecciona varios y hazlo desde el menú contextual de la
+  selección. Los módulos excluidos llevan un marco rojo, y `Ctrl+R`,
+  `Ctrl+Shift+R`, el Patch Mutator y `mutate_patch` del puente MCP no los
+  tocan. La barra de estado dice cuántos se han saltado.
+- Tampoco se tocan los parámetros bloqueados, ni los interruptores on/off, mutes,
+  niveles o bypass, para que randomizar no deje el patch en silencio.
 - Initialize devuelve el patch a un estado limpio.
 
 Para diseño de sonido evolutivo con cruce e interpolación, mira el

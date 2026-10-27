@@ -1,6 +1,7 @@
 #include "Patch.h"
 #include "ModuleDescriptions.h"
 #include <set>
+#include <algorithm>
 
 // --- Module ---
 
@@ -163,7 +164,59 @@ bool ModuleContainer::canAdd(const ModuleDescriptor& desc) const
     return count < desc.limit && desc.instantiable;
 }
 
-void ModuleContainer::addConnection(Connector* output, Connector* input)
+SignalType Connection::colour() const
+{
+    if (storedColor >= 0)
+        return static_cast<SignalType>(storedColor);
+    if (output != nullptr && output->getDescriptor() != nullptr)
+        return output->getDescriptor()->signalType;
+    return SignalType::None;
+}
+
+SignalType ModuleContainer::colourOf(const Connection& c) const
+{
+    // A stored colour says what the connection is; it is never second-guessed.
+    if (c.storedColor >= 0)
+        return c.colour();
+
+    // From an output, the cable starts where its signal is: nothing to look up.
+    const Connector* start = c.output;
+    if (start == nullptr || start->getDescriptor() == nullptr || start->getDescriptor()->isOutput)
+        return c.colour();
+
+    // Chained from an input: walk the net, as findNetOutput does, for its driver.
+    std::vector<const Connector*> stack { start };
+    std::set<const Connector*> visited { start };
+    while (!stack.empty())
+    {
+        const Connector* cur = stack.back();
+        stack.pop_back();
+
+        for (const auto& conn : connections)
+        {
+            const Connector* other = nullptr;
+            if (conn.output == cur)      other = conn.input;
+            else if (conn.input == cur)  other = conn.output;
+
+            if (other == nullptr || !visited.insert(other).second)
+                continue;
+            if (other->getDescriptor() != nullptr && other->getDescriptor()->isOutput)
+                return other->getDescriptor()->signalType;
+            stack.push_back(other);
+        }
+    }
+    return c.colour();   // no output drives this net yet
+}
+
+int ModuleContainer::getStoredColor(const Connector* output, const Connector* input) const
+{
+    for (const auto& c : connections)
+        if (c.output == output && c.input == input)
+            return c.storedColor;
+    return -1;
+}
+
+void ModuleContainer::addConnection(Connector* output, Connector* input, int storedColor)
 {
     if (output == nullptr || input == nullptr)
         return;
@@ -172,7 +225,7 @@ void ModuleContainer::addConnection(Connector* output, Connector* input)
         if (c.output == output && c.input == input)
             return;
 
-    connections.push_back({ output, input });
+    connections.push_back({ output, input, Connection::validColor(storedColor) });
     if (onCableAdded)
         onCableAdded(output, input);
 }
@@ -310,6 +363,49 @@ Module* Patch::createModule(int section, int typeId, int gridX, int gridY,
     Module* modulePtr = container.addModule(std::move(module));
 
     return modulePtr;
+}
+
+Patch::DroppedAssignments Patch::dropDanglingAssignments()
+{
+    // section 0 and 1 are the voice areas and name a module by index; 2 is the
+    // morph section, which has no module list to check against.
+    auto missing = [this](int section, int moduleIndex)
+    {
+        if (section != 0 && section != 1)
+            return false;
+        return getContainer(section).getModuleByIndex(moduleIndex) == nullptr;
+    };
+
+    DroppedAssignments dropped;
+
+    const auto morphsBefore = morphAssignments.size();
+    morphAssignments.erase(
+        std::remove_if(morphAssignments.begin(), morphAssignments.end(),
+            [&missing](const MorphAssignment& ma) { return missing(ma.section, ma.module); }),
+        morphAssignments.end());
+    dropped.morphs = static_cast<int>(morphsBefore - morphAssignments.size());
+
+    for (size_t k = 0; k < knobAssignments.size(); ++k)
+    {
+        auto& ka = knobAssignments[k];
+        if (ka.assigned && missing(ka.section, ka.module))
+        {
+            ka = KnobAssignment{};
+            dropped.knobs.push_back(static_cast<int>(k));
+        }
+    }
+
+    for (const auto& ca : ctrlAssignments)
+        if (missing(ca.section, ca.module))
+            dropped.ctrls.push_back(ca.control);
+
+    ctrlAssignments.erase(
+        std::remove_if(ctrlAssignments.begin(), ctrlAssignments.end(),
+            [&missing](const CtrlAssignment& ca) { return missing(ca.section, ca.module); }),
+        ctrlAssignments.end());
+
+    danglingDropped = dropped;
+    return dropped;
 }
 
 void Patch::applyCustomDumpEntry(int section, const CustomDumpEntry& entry)

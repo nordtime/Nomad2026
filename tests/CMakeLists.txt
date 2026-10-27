@@ -1,35 +1,108 @@
-# Unit tests for the pure layers: patch codec, SysEx framing, upload
-# packetization and module placement. Everything here runs without a GUI and
-# without a synth on the wire; the doctest single header is vendored in
+# Tests for the pure layers and MIDI connection lifetime. Everything here runs
+# without a window or a synth on the wire; the doctest single header is vendored in
 # libs/doctest so the tests build offline.
 juce_add_console_app(nme_tests PRODUCT_NAME "nme_tests")
 
 target_sources(nme_tests PRIVATE
     test_main.cpp
+    test_new_module_message.cpp
     test_sysex_codec.cpp
+    test_recolor_cable_message.cpp
     test_upload_packetizer.cpp
     test_patch_roundtrip.cpp
+    test_pch_header_flags.cpp
     test_module_placement.cpp
     test_light_meter_layout.cpp
     test_module_ref.cpp
     test_theme_data.cpp
     test_cable_nets.cpp
+    test_cable_colours.cpp
+    test_store_confirmation.cpp
     test_patch_title.cpp
     test_patch_file_name.cpp
+    test_seq_note_names.cpp
+    test_module_naming.cpp
+    test_dangling_assignments.cpp
+    test_midi_lifecycle.cpp
+    test_synchronizer_new_module.cpp
+    test_bank_backup_safety.cpp
+    test_bank_flash.cpp
+    test_mcp_event_log.cpp
+    test_mcp_rules.cpp
+    test_morph_assign_action.cpp
+    test_module_replacement.cpp
+    test_editor_key.cpp
+    test_module_title_limit.cpp
+    test_synth_settings_clock.cpp
+    test_synth_link.cpp
+    test_synth_slot.cpp
+    test_direct_link.cpp
+    test_keyquant_scales.cpp
+    test_slot_set.cpp
+    test_session_state.cpp
+    test_pch_area_rows.cpp
+    test_pch_macbinary.cpp
+    test_pch_legacy210.cpp
+    test_theme_file.cpp
+    test_community_themes.cpp
+    test_version_check.cpp
+    test_mutator.cpp
+    test_os_update.cpp
+    test_synth_model.cpp
 
     # The units under test, pulled straight from the app tree
     ${CMAKE_SOURCE_DIR}/source/model/LightMeterLayout.cpp
     ${CMAKE_SOURCE_DIR}/source/model/ThemeData.cpp
+    ${CMAKE_SOURCE_DIR}/source/ui/ThemeFile.cpp
+    ${CMAKE_SOURCE_DIR}/source/ui/CommunityThemes.cpp
+    ${CMAKE_SOURCE_DIR}/source/ui/VersionCheck.cpp
+    ${CMAKE_SOURCE_DIR}/source/ui/ThemeRegistry.cpp
+    ${CMAKE_SOURCE_DIR}/source/ui/ColorScheme.cpp
+    ${CMAKE_SOURCE_DIR}/source/ui/AppTheme.cpp
     ${CMAKE_SOURCE_DIR}/source/model/Patch.cpp
     ${CMAKE_SOURCE_DIR}/source/model/ModuleDescriptions.cpp
+    ${CMAKE_SOURCE_DIR}/source/format/ValueFormatters.cpp
     ${CMAKE_SOURCE_DIR}/source/model/ModuleTags.cpp
     ${CMAKE_SOURCE_DIR}/source/model/PatchParser.cpp
     ${CMAKE_SOURCE_DIR}/source/model/PatchSerializer.cpp
     ${CMAKE_SOURCE_DIR}/source/model/PchFileIO.cpp
     ${CMAKE_SOURCE_DIR}/source/midi/SysExCodec.cpp
     ${CMAKE_SOURCE_DIR}/source/midi/UploadPacketizer.cpp
+    ${CMAKE_SOURCE_DIR}/source/midi/OsUpdate.cpp
+    ${CMAKE_SOURCE_DIR}/source/midi/NmMessages.cpp
+    ${CMAKE_SOURCE_DIR}/source/midi/NmProtocol.cpp
+    ${CMAKE_SOURCE_DIR}/source/midi/MidiMonitor.cpp
+    ${CMAKE_SOURCE_DIR}/source/midi/MidiDeviceManager.cpp
+    ${CMAKE_SOURCE_DIR}/source/midi/DirectLink.cpp
+    ${CMAKE_SOURCE_DIR}/source/midi/ConnectionManager.cpp
+    ${CMAKE_SOURCE_DIR}/source/sync/PatchSynchronizer.cpp
+    ${CMAKE_SOURCE_DIR}/source/sync/BankTransferManager.cpp
+    ${CMAKE_SOURCE_DIR}/source/sync/PchList.cpp
+    ${CMAKE_SOURCE_DIR}/source/protocol/NewCableMessage.cpp
+    ${CMAKE_SOURCE_DIR}/source/protocol/DeleteCableMessage.cpp
+    ${CMAKE_SOURCE_DIR}/source/protocol/RecolorCableMessage.cpp
+    ${CMAKE_SOURCE_DIR}/source/protocol/MoveModuleMessage.cpp
+    ${CMAKE_SOURCE_DIR}/source/protocol/DeleteModuleMessage.cpp
+    ${CMAKE_SOURCE_DIR}/source/protocol/NewModuleMessage.cpp
+    ${CMAKE_SOURCE_DIR}/source/protocol/ParameterEncoder.cpp
     ${CMAKE_SOURCE_DIR}/source/protocol/SysExMessage.cpp
     ${CMAKE_SOURCE_DIR}/source/protocol/SetPatchTitleMessage.cpp
+    ${CMAKE_SOURCE_DIR}/source/protocol/SetModuleTitleMessage.cpp
+    ${CMAKE_SOURCE_DIR}/source/protocol/StorePatchMessage.cpp
+    ${CMAKE_SOURCE_DIR}/source/protocol/DeletePatchMessage.cpp
+    ${CMAKE_SOURCE_DIR}/source/protocol/SendControllerSnapshotMessage.cpp
+    ${CMAKE_SOURCE_DIR}/source/protocol/KnobAssignmentMessage.cpp
+    ${CMAKE_SOURCE_DIR}/source/protocol/MidiCtrlAssignmentMessage.cpp
+    ${CMAKE_SOURCE_DIR}/source/protocol/MorphAssignmentMessage.cpp
+    ${CMAKE_SOURCE_DIR}/source/protocol/MorphRangeChangeMessage.cpp
+    ${CMAKE_SOURCE_DIR}/source/mcp/McpEventLog.cpp
+    ${CMAKE_SOURCE_DIR}/source/model/ModuleReplacement.cpp
+    ${CMAKE_SOURCE_DIR}/source/model/KeyQuantScales.cpp
+    ${CMAKE_SOURCE_DIR}/source/model/SlotSet.cpp
+    ${CMAKE_SOURCE_DIR}/source/model/SessionState.cpp
+    ${CMAKE_SOURCE_DIR}/source/model/Mutator.cpp
+    ${CMAKE_SOURCE_DIR}/source/model/MutationCategories.cpp
+    ${CMAKE_SOURCE_DIR}/source/model/PatchVariations.cpp
 )
 
 target_include_directories(nme_tests PRIVATE
@@ -43,13 +116,63 @@ target_compile_definitions(nme_tests PRIVATE
     NME_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
+    JUCE_MODAL_LOOPS_PERMITTED=1
 )
 
 target_link_libraries(nme_tests PRIVATE
     juce::juce_core
+    juce::juce_cryptography   # CommunityThemes (#91)
+    juce::juce_events
+    juce::juce_data_structures   # juce::UndoManager, for the undo action tests
+    juce::juce_audio_devices
     juce::juce_graphics    # Descriptors carry juce::Colour
+    juce::juce_gui_basics  # ThemeRegistry/AppTheme (themes as files, #90)
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags
 )
 
 add_test(NAME nme_tests COMMAND nme_tests)
+
+# nme_pch_dump: what PchFileIO understands of each .pch, as JSON lines, to compare
+# against a reference reader over a whole patch archive (see the file header).
+juce_add_console_app(nme_pch_dump PRODUCT_NAME "nme_pch_dump")
+target_sources(nme_pch_dump PRIVATE
+    pch_dump.cpp
+    ${CMAKE_SOURCE_DIR}/source/model/Patch.cpp
+    ${CMAKE_SOURCE_DIR}/source/model/ModuleDescriptions.cpp
+    ${CMAKE_SOURCE_DIR}/source/model/ModuleTags.cpp
+    ${CMAKE_SOURCE_DIR}/source/model/PchFileIO.cpp
+    ${CMAKE_SOURCE_DIR}/source/format/ValueFormatters.cpp
+)
+target_include_directories(nme_pch_dump PRIVATE ${CMAKE_SOURCE_DIR}/source)
+target_compile_definitions(nme_pch_dump PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+target_link_libraries(nme_pch_dump PRIVATE
+    juce::juce_core
+    juce::juce_events
+    juce::juce_data_structures
+    juce::juce_graphics
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_warning_flags
+)
+
+# nme_theme_export: the built-in themes as the official files of animatek/nme-themes
+# (see the file header).
+juce_add_console_app(nme_theme_export PRODUCT_NAME "nme_theme_export")
+target_sources(nme_theme_export PRIVATE
+    theme_export.cpp
+    ${CMAKE_SOURCE_DIR}/source/ui/ThemeFile.cpp
+    ${CMAKE_SOURCE_DIR}/source/ui/ThemeRegistry.cpp
+    ${CMAKE_SOURCE_DIR}/source/ui/ColorScheme.cpp
+    ${CMAKE_SOURCE_DIR}/source/ui/AppTheme.cpp
+)
+target_include_directories(nme_theme_export PRIVATE ${CMAKE_SOURCE_DIR}/source)
+target_compile_definitions(nme_theme_export PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+target_link_libraries(nme_theme_export PRIVATE
+    juce::juce_core
+    juce::juce_events
+    juce::juce_data_structures
+    juce::juce_graphics
+    juce::juce_gui_basics
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_warning_flags
+)

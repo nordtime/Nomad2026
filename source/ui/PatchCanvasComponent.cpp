@@ -125,13 +125,40 @@ void PatchCanvas::setZoomLevel(float z, juce::Point<int> /*anchor*/)
     z = juce::jlimit(zoomMin, zoomMax, z);
     if (std::abs(z - zoomLevel) < 0.001f)
         return;
+    zoomedToSelection = false;   // zoomed by hand: Z starts over
     zoomLevel = z;
     updateSizeForZoom();
     repaint();
 }
 
+void PatchCanvas::toggleZoomToSelection()
+{
+    auto* vp = findParentComponentOfClass<juce::Viewport>();
+    if (zoomedToSelection)
+    {
+        // The second Z: back to the zoom and the place it was at before the first
+        zoomedToSelection = false;
+        zoomLevel = zoomBeforeSelection;
+        updateSizeForZoom();
+        if (vp != nullptr)
+            vp->setViewPosition(viewBeforeSelection);
+        repaint();
+        return;
+    }
+    if (hasSelection())
+    {
+        zoomBeforeSelection = zoomLevel;
+        viewBeforeSelection = vp != nullptr ? vp->getViewPosition() : juce::Point<int>();
+        zoomToSelection();
+        zoomedToSelection = true;
+    }
+    else
+        resetZoom();
+}
+
 void PatchCanvas::resetZoom()
 {
+    zoomedToSelection = false;
     if (auto* vp = findParentComponentOfClass<juce::Viewport>())
     {
         auto vpCenter = vp->getViewPosition() + juce::Point<int>(vp->getWidth() / 2, vp->getHeight() / 2);
@@ -558,7 +585,7 @@ juce::String PatchCanvas::getParameterValueText(const Parameter& param) const
     if (pd == nullptr)
         return juce::String(param.getValue());
 
-    const auto fmt = [pd](int v) { return ValueFormatters::format(pd->formatter, v); };
+    const auto fmt = [pd](int v) { return ValueFormatters::format(*pd, v); };
     const auto start = fmt(param.getValue());
 
     const int group = param.getMorphGroup();
@@ -795,13 +822,14 @@ void PatchCanvas::commitLiftedCableMove(ModuleContainer& container,
     // editor uses and the order the synth is given them in. Both model calls
     // notify the synchronizer; the two undo actions are told the model work is
     // already done, exactly as the right-click delete and the plain cable drag
-    // already do.
-    container.removeConnection(liftedCable.out, liftedCable.in);
-
+    // already do. The delete is reported before the cable goes, as the right-click delete does,
+    // so its undo can read the colour it had (#100).
     if (cableDeletedCallback)
         cableDeletedCallback(liftedCable.section,
                              liftedCable.outModIndex, liftedCable.outConnIndex, liftedCable.outIsOutput,
                              liftedCable.inModIndex,  liftedCable.inConnIndex,  liftedCable.inIsOutput);
+
+    container.removeConnection(liftedCable.out, liftedCable.in);
 
     liftedCable = {};
 

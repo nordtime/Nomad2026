@@ -1,39 +1,75 @@
 #include "MainComponent.h"
+#include "midi/SynthLink.h"
 #include "ui/KnobDrag.h"
 #include "model/PatchParser.h"
 #include "model/PchFileIO.h"
+#include "model/SessionState.h"
 #include "ui/BankTransferDialog.h"
+#include "ui/OsUpdateDialog.h"
 #include "ui/MidiSettingsDialog.h"
 #include "ui/PatchLocationDialog.h"
 #include "ui/AboutDialog.h"
+#include "help/ModuleHelpPopup.h"
+#include "ui/ThemesDialog.h"
+#include "ui/ShortcutsDialog.h"
+#include "ui/FlatCloseButton.h"
+#include "ui/EditorOptionsDialog.h"
+#include "ui/SaveSlotSetDialog.h"
 #include "ui/SelfOwnedDialog.h"
 #include "ui/SlotSelectDialog.h"
 #include "ui/PatchSettingsDialog.h"
 #include "ui/SynthSettingsDialog.h"
 #include "ui/AppTheme.h"
 #include "ui/ThemeRegistry.h"
+#include "ui/ThemeFile.h"
+#include "ui/AppLookAndFeel.h"
+#include "ui/VersionCheck.h"
 #include "model/Mutator.h"
 #include "model/MutationCategories.h"
+#include "format/ValueFormatters.h"
 #include "protocol/StorePatchMessage.h"
 #include "protocol/MorphKeyboardAssignmentMessage.h"
+#include "protocol/KnobAssignmentMessage.h"
+#include "protocol/MidiCtrlAssignmentMessage.h"
 #include "BinaryData.h"
 #include <iostream>
 #include <set>
 #include <climits>
 
+// Menu ids for "show/hide slot": clear of the 200+ range the theme list takes.
+static constexpr int kSlotMenuIdBase = 1000;
+
+// Port 1 keeps the settings keys it always had, so an upgrade finds its saved ports;
+// the others carry their number.
+static juce::String portKey(const char* base, int synth) {
+  return synth == 0 ? juce::String(base) : juce::String(base) + "_" + juce::String(synth + 1);
+}
+
+// One AppLookAndFeel as the default for as long as any editor is open (the plugin can
+// have several); AppTheme colours whichever is the default, so it is set first.
+static int appLookAndFeelUsers = 0;
+static AppLookAndFeel& appLookAndFeel() {
+  static AppLookAndFeel lf;
+  return lf;
+}
+
 MainComponent::MainComponent(juce::ApplicationProperties &props)
     : appProperties(props) {
+  if (appLookAndFeelUsers++ == 0)
+    juce::LookAndFeel::setDefaultLookAndFeel(&appLookAndFeel());
   editorOptions = EditorOptions::load(appProperties.getUserSettings());
   AppTheme::setPalette(ThemeRegistry::get(editorOptions.uiThemeIndex).app);
   editorOptions.ensureLibraryFolders();
+  applyInterfaceScale(editorOptions.uiScale);
   PatchCanvas::setCableStyle   (static_cast<int>(editorOptions.cableStyle));
   KnobDrag::setMode           (static_cast<int>(editorOptions.knobControl));
   PatchCanvas::setAutoUpload   (editorOptions.autoUpload);
   PatchCanvas::setCableOpacity (editorOptions.cableOpacity);
+  ValueFormatters::setPreferNoteNames (editorOptions.seqNoteNames);
   {
     const auto& rates = EditorOptions::sendRates();
     const int ri = juce::jlimit(0, static_cast<int>(rates.size()) - 1, editorOptions.sendRateIndex);
-    connectionManager.setParamSendRate(rates[static_cast<size_t>(ri)].batch,
+    synthHub.active().setParamSendRate(rates[static_cast<size_t>(ri)].batch,
                                        rates[static_cast<size_t>(ri)].intervalMs);
   }
   setWantsKeyboardFocus(true);
@@ -98,19 +134,22 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
   {
     auto canvasScheme = ThemeRegistry::get(editorOptions.uiThemeIndex).makeCanvas();
     canvasScheme.wireframe = editorOptions.wireframe;
+    canvasScheme.skeuomorphic = editorOptions.hardwareLook;
+    canvasScheme.knobStyle = editorOptions.hardwareKnobStyle;
+    canvasScheme.flatKnobs = editorOptions.flatKnobs;
     mainLayout->setTheme(canvasScheme);
   }
   addAndMakeVisible(mainLayout.get());
 
   // Wire connection manager status updates to UI
-  connectionManager.setStatusCallback(
-      [this](const ConnectionManager::Status &status) {
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setStatusCallback(
+      [this, s](const ConnectionManager::Status &status) {
         juce::Component::SafePointer<MainComponent> safeThis(this);
         juce::MessageManager::callAsync(
-            [safeThis, status]() { if (safeThis) safeThis->onConnectionStatusChanged(status); });
-      });
+            [safeThis, s, status]() { if (safeThis) safeThis->onConnectionStatusChanged(s, status); });
+      }); });
 
-  connectionManager.setVoiceCountCallback([this](const int voiceCounts[4]) {
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setVoiceCountCallback([this, s](const int voiceCounts[4]) {
     int total =
         voiceCounts[0] + voiceCounts[1] + voiceCounts[2] + voiceCounts[3];
     int c0 = voiceCounts[0], c1 = voiceCounts[1], c2 = voiceCounts[2], c3 = voiceCounts[3];
@@ -118,12 +157,25 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
         + juce::String(c2) + " " + juce::String(c3) + " total=" + juce::String(total));
     juce::Component::SafePointer<MainComponent> safeThis(this);
     juce::MessageManager::callAsync(
-        [safeThis, total, c0, c1, c2, c3]() {
+        [safeThis, s, total, c0, c1, c2, c3]() {
           if (!safeThis) return;
+          auto& state = safeThis->synthState[static_cast<size_t>(s)];
+          const std::array<int, 4> counts { c0, c1, c2, c3 };
+          if (counts != state.voiceCounts) {
+            state.voiceCounts = counts;
+            juce::Array<juce::var> perSlot;
+            for (int c : counts)
+              perSlot.add(c);
+            auto* info = new juce::DynamicObject();
+            info->setProperty("voices", perSlot);
+            info->setProperty("synth", s);
+            safeThis->mcpEventLog.record("voice_count", -1, juce::var(info));
+          }
+          if (s != safeThis->synthHub.activeSynth()) return;   // the bar shows the synth being edited
           safeThis->mainLayout->getStatusBar().setVoiceCount(total);
           safeThis->mainLayout->getHeaderBar().setSynthDspLoad(c0, c1, c2, c3);
         });
-  });
+  }); });
 
   mainLayout->getPatchArea().setAnimated(editorOptions.animateTiling);
   mainLayout->setModuleIconBarVisible(editorOptions.moduleIconBar);
@@ -178,7 +230,7 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
     saveMdiLayout();
     // The ABCD button greys out when the layout is already the canonical one,
     // and this is the only place that knows the layout moved.
-    mainLayout->getHeaderBar().setRetileEnabled(
+    mainLayout->getModuleIconBar().setRetileEnabled(
         mainLayout->getPatchArea().canResetTileOrder());
   };
 
@@ -203,8 +255,8 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
   mainLayout->getInspector().onParameterChanged =
       [this](int section, Module* module, int paramIndex, int value) {
     if (!module) return;
-    connectionManager.sendParameter(activeSlot, section, module->getContainerIndex(),
-                                    paramIndex, value);
+    synthHub.sendParameterFromUser(activeSlot, section, module->getContainerIndex(),
+                                            paramIndex, value);
     canvasFor(activeSlot).repaintCanvas();
     if (knobFloaterWindow && knobFloaterWindow->isVisible())
       knobFloaterWindow->refresh();
@@ -273,30 +325,63 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
   // Wire patch list updates to patch browser panel
   // The synth answers a bank load with the location it loaded, whether the load
   // came from here or from the front panel. Arrives on the MIDI thread.
-  connectionManager.setBankLocationCallback([this](int slot) {
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setBankLocationCallback([this, s](int localSlot) {
+    const int slot = SynthSlot::global(s, localSlot);
     juce::Component::SafePointer<MainComponent> safeThis(this);
     juce::MessageManager::callAsync([safeThis, slot]() {
       if (!safeThis) return;
       if (slot == safeThis->activeSlot)
         safeThis->updateStoreLocationDisplay();
     });
-  });
+  }); });
 
-  connectionManager.setPatchListCallback([this](const std::vector<std::string>& names) {
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setPatchListCallback([this, s](const std::vector<std::string>& names) {
     juce::Component::SafePointer<MainComponent> safeThis(this);
-    juce::MessageManager::callAsync([safeThis, names]() {
+    juce::MessageManager::callAsync([safeThis, s, names]() {
       if (!safeThis) return;
-      safeThis->mainLayout->getPatchBrowser().setPatchList(names);
-      safeThis->mainLayout->getPatchBrowser().setLoadingState(false);
+      // The browser lists the bank of the synth being edited.
+      if (s == safeThis->synthHub.activeSynth()) {
+        safeThis->mainLayout->getPatchBrowser().setPatchList(names);
+        safeThis->mainLayout->getPatchBrowser().setLoadingState(false);
+      }
       // The list is usually the last thing to arrive, so this is where slots
       // filled at connection time finally learn where their patch lives.
-      for (int s = 0; s < numSlots; ++s)
-        safeThis->inferSlotBankLocation(s);
+      for (int l = 0; l < kSlotsPerSynth; ++l)
+        safeThis->inferSlotBankLocation(SynthSlot::global(s, l));
     });
-  });
+  }); });
 
-  connectionManager.setSynthSettingsCallback([this](const SynthSettings& settings) {
-    cachedSynthSettings = settings;
+  // An upload the synth did not take leaves it holding whatever it had: the
+  // editor's patch is LOCAL from then on, and its edits must not be sent to a
+  // slot that has another patch, so its synchronizer goes as after a Local load.
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setUploadFailedCallback([this, s](int localSlot, const juce::String& reason) {
+    const int slot = SynthSlot::global(s, localSlot);
+    if (localSlot < 0 || localSlot >= kSlotsPerSynth)
+      return;
+    synthHub.synth(s).setUploadCompleteCallback(nullptr);
+    slotSynchronizers[slot].reset();
+    setSlotLocal(slot, true);
+    const juce::String slotName = SynthSlot::label(slot);
+    mainLayout->getStatusBar().showMessage(
+        "Upload to slot " + slotName + " failed (" + reason
+            + "): the synth does not have this patch, the slot is LOCAL", 0);
+    auto* info = new juce::DynamicObject();
+    info->setProperty("reason", reason);
+    mcpEventLog.record("upload_failed", slot, juce::var(info));
+  }); });
+
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setSynthSettingsCallback([this, s](const SynthSettings& settings) {
+    synthState[static_cast<size_t>(s)].settings = settings;
+    synthState[static_cast<size_t>(s)].settingsKnown = true;
+    // A new G1-Emu instance starts as a copy of the standalone, name included: two synths called
+    // the same cannot be told apart, so the emulator this editor connected by itself gets a name
+    // of its own. Never a real G1, nor a port set by hand.
+    if (giveDuplicateEmulatorAName(s))
+      return;   // the new name is shown already; the rest below would put the old one back
+    setSynthDisplayName(s, settings.name.empty() ? juce::String("Modular")
+                                                  : juce::String(settings.name));
+    if (s != synthHub.activeSynth())
+      return;
     if (!settings.name.empty())
       mainLayout->getHeaderBar().setSynthName(juce::String(settings.name));
     if (synthSettingsDialog != nullptr)
@@ -306,14 +391,32 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
       pendingSynthSettingsDialogOpen = false;
       openSynthSettingsDialog();
     }
-  });
+  }); });
 
   // Wire patch browser callbacks
+  // The two "hide" switches of the browsers are kept between sessions
+  if (auto* st = appProperties.getUserSettings()) {
+    mainLayout->getPatchBrowser().setHideEmpty(st->getBoolValue("browserHideEmpty", false));
+    mainLayout->getDiskPresetBrowser().setHidePch2(st->getBoolValue("browserHidePch2", false));
+  }
+  mainLayout->getPatchBrowser().onHideEmptyChanged = [this](bool hide) {
+    if (auto* st = appProperties.getUserSettings()) {
+      st->setValue("browserHideEmpty", hide);
+      st->saveIfNeeded();
+    }
+  };
+  mainLayout->getDiskPresetBrowser().onHidePch2Changed = [this](bool hide) {
+    if (auto* st = appProperties.getUserSettings()) {
+      st->setValue("browserHidePch2", hide);
+      st->saveIfNeeded();
+    }
+  };
   mainLayout->getPatchBrowser().onPatchDoubleClicked = [this](int section, int position) {
     loadBankPatchIntoSlot(section, position, activeSlot);
   };
+  // The browser lists the bank of the synth being edited, so its slot menu (A..D) is that synth's.
   mainLayout->getPatchBrowser().onPatchLoadToSlot = [this](int section, int position, int slot) {
-    loadBankPatchIntoSlot(section, position, slot);
+    loadBankPatchIntoSlot(section, position, SynthSlot::global(synthHub.activeSynth(), slot));
   };
 
   // Dragging a patch out of the Synth browser onto a slot loads it there
@@ -324,6 +427,7 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
   // The Disk browser's patches drop the same way, and land in the same places.
   // No slot chooser on this path, unlike File > Open: the drop already named the
   // slot, and asking again would be asking twice.
+  mainLayout->getSlotBar().loadProvider = [this](int synth) { return synthDspLoad(synth); };
   mainLayout->getSlotBar().onPatchDroppedOnSlot =
       [this](int section, int position, int slot) {
     loadBankPatchIntoSlot(section, position, slot);
@@ -344,11 +448,11 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
 
   mainLayout->getPatchBrowser().onRefreshRequested = [this]() {
     mainLayout->getPatchBrowser().setLoadingState(true);
-    connectionManager.requestPatchList();
+    synthHub.active().requestPatchList();
   };
 
   mainLayout->getPatchBrowser().onPatchDelete = [this](int section, int position) {
-    const auto& patchList = connectionManager.getPatchList();
+    const auto& patchList = synthHub.active().getPatchList();
     int index = section * 99 + position;
     juce::String patchName = (index < static_cast<int>(patchList.size()) && !patchList[index].empty())
                               ? patchList[index] : "--";
@@ -362,38 +466,41 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
     dialog->enterModalState(true, juce::ModalCallbackFunction::create(
         [safeThis, section, position](int result) {
           if (safeThis != nullptr && result == 1)
-              safeThis->connectionManager.deletePatchInBank(section, position);
+              safeThis->synthHub.active().deletePatchInBank(section, position);
         }), true);
   };
 
   mainLayout->getPatchBrowser().onPatchCopy = [this](int section, int position) {
     juce::Component::SafePointer<MainComponent> safeThis(this);
-    PatchLocationDialog::show(this, "Copy Patch", connectionManager.getPatchList(), true, activeSlot,
+    PatchLocationDialog::show(this, "Copy Patch", synthHub.active().getPatchList(), true,
+                              SynthSlot::localOf(activeSlot),
       [safeThis, section, position](const PatchLocationDialog::Result& r) {
         if (safeThis != nullptr && r.confirmed)
-          safeThis->connectionManager.copyPatchInBank(section, position, r.section, r.position, r.slot);
+          safeThis->synthHub.active().copyPatchInBank(section, position, r.section, r.position, r.slot);
       });
   };
 
   mainLayout->getPatchBrowser().onPatchMove = [this](int section, int position) {
     juce::Component::SafePointer<MainComponent> safeThis(this);
-    PatchLocationDialog::show(this, "Move Patch", connectionManager.getPatchList(), true, activeSlot,
+    PatchLocationDialog::show(this, "Move Patch", synthHub.active().getPatchList(), true,
+                              SynthSlot::localOf(activeSlot),
       [safeThis, section, position](const PatchLocationDialog::Result& r) {
         if (safeThis != nullptr && r.confirmed)
-          safeThis->connectionManager.movePatchInBank(section, position, r.section, r.position, r.slot);
+          safeThis->synthHub.active().movePatchInBank(section, position, r.section, r.position, r.slot);
       });
   };
 
-  connectionManager.setPatchDataCallback(
-      [this](const std::vector<std::vector<uint8_t>> &sections, int targetSlot) {
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setPatchDataCallback(
+      [this, s](const std::vector<std::vector<uint8_t>> &sections, int localSlot) {
         DBG("Patch data received: " + juce::String(sections.size()) +
             " sections, parsing...");
+        const int targetSlot = SynthSlot::global(s, localSlot);
 
         PatchParser parser(moduleDescs);
         auto patch = parser.parse(sections);
 
         juce::Component::SafePointer<MainComponent> safeThis(this);
-        juce::MessageManager::callAsync([safeThis, p = std::move(patch), targetSlot]() mutable {
+        juce::MessageManager::callAsync([safeThis, s, p = std::move(patch), targetSlot]() mutable {
           if (!safeThis) return;
           if (targetSlot < 0 || targetSlot >= numSlots)
             return;
@@ -401,9 +508,14 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
           // Store patch in the correct slot
           safeThis->slotSynchronizers[targetSlot].reset();
 
-          // If replacing the active slot, clear UI refs BEFORE destroying old patch
+          // If replacing the active slot, clear UI refs BEFORE destroying old
+          // patch. setPatch(nullptr), not clearModule(): clearModule keeps the
+          // inspector's own Patch pointer and re-arms the assignments list with
+          // it, so the list goes on holding the patch this function is about to
+          // destroy. Only setPatch(nullptr) drops both. It is re-pointed at the
+          // incoming patch further down.
           if (targetSlot == safeThis->activeSlot) {
-            safeThis->mainLayout->getInspector().clearModule();
+            safeThis->mainLayout->getInspector().setPatch(nullptr);
             if (safeThis->knobFloaterWindow)
               safeThis->knobFloaterWindow->setPatch(nullptr);
             if (safeThis->patchNotesFloaterWindow)
@@ -429,10 +541,11 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
           }
 
           safeThis->slotPatches[targetSlot] = std::move(p);
+          ++safeThis->slotPatchGeneration[targetSlot];
           if (safeThis->slotPatches[targetSlot]) {
-            if (safeThis->connectionManager.isConnected()) {
+            if (safeThis->synthHub.synth(s).isConnected()) {
               safeThis->slotSynchronizers[targetSlot] = std::make_unique<PatchSynchronizer>(
-                  *safeThis->slotPatches[targetSlot], safeThis->connectionManager, targetSlot);
+                  *safeThis->slotPatches[targetSlot], safeThis->synthHub.synth(s), SynthSlot::localOf(targetSlot));
             }
 
             safeThis->slotUndoManagers[targetSlot].clearUndoHistory();
@@ -460,8 +573,8 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
               safeThis->mainLayout->getStatusBar().setConnectionStatus(
                   "Connected - " + safeThis->currentPatch()->getName(), true);
 
-              int ls = safeThis->connectionManager.getLastLoadedSection();
-              int lp = safeThis->connectionManager.getLastLoadedPosition();
+              int ls = safeThis->synthHub.synth(s).getLastLoadedSection();
+              int lp = safeThis->synthHub.synth(s).getLastLoadedPosition();
               if (ls >= 0 && lp >= 0)
                   safeThis->mainLayout->getPatchBrowser().setLoadedPatch(ls, lp);
               safeThis->updateStoreLocationDisplay();
@@ -471,32 +584,50 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
             // so the slot is in sync — clear any stale LOCAL badge (issue #21).
             safeThis->mainLayout->getSlotBar().setSlotName(targetSlot, safeThis->slotPatches[targetSlot]->getName());
             safeThis->setSlotLocal(targetSlot, false);
+            {
+              auto* info = new juce::DynamicObject();
+              info->setProperty("patchName", safeThis->slotPatches[targetSlot]->getName());
+              safeThis->mcpEventLog.record("patch_received", targetSlot, juce::var(info));
+            }
 
             // Then work out where it lives. This has to come after the LOCAL
             // badge is cleared: a slot still marked local is not looked up.
             safeThis->slotPatchFromSynth[targetSlot] = true;
+
+            // The first patch is what makes a rename stick (it brings the patch id the settings
+            // are sent under): an emulator still waiting for its own name gets it now.
+            const auto& synthSt = safeThis->synthState[static_cast<size_t>(s)];
+            if (synthSt.settingsKnown && !synthSt.autoNameTried)
+              safeThis->giveDuplicateEmulatorAName(s);
             safeThis->inferSlotBankLocation(targetSlot);
 
             // And give it back its comments, notes, variations and Mutator
             // exclusions, which could not travel over the wire.
             safeThis->attachExtrasFromLibrary(targetSlot);
 
-            const char* slotLetters[] = {"A", "B", "C", "D"};
-            std::cout << "[SYNC] Patch loaded into slot " << slotLetters[targetSlot]
+            // The sweep on the way in threw away assignments naming a module
+            // this patch does not have. The synth is the one holding the patch,
+            // so its panel still has those LEDs lit and nothing else will ever
+            // reach them: the editor has just forgotten they existed. Told here,
+            // knob by knob, while the model and the synth still agree on
+            // everything else.
+            safeThis->clearDroppedPanelAssignments(targetSlot);
+
+            std::cout << "[SYNC] Patch loaded into slot " << SynthSlot::label(targetSlot)
                       << ": " << safeThis->slotPatches[targetSlot]->getName().toStdString() << std::endl;
           }
 
           if (safeThis->pendingBrowserLoadSlot == targetSlot)
             safeThis->pendingBrowserLoadSlot = -1;
         });
-      });
+      }); });
 
   // Patch fetch progress in the status bar — some patches take a few seconds
   // to stream from the synth and the UI should show something is happening.
-  connectionManager.setPatchLoadProgressCallback([this](int done, int total) {
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setPatchLoadProgressCallback([this, s](int done, int total) {
     juce::Component::SafePointer<MainComponent> safeThis(this);
-    juce::MessageManager::callAsync([safeThis, done, total]() {
-      if (!safeThis) return;
+    juce::MessageManager::callAsync([safeThis, s, done, total]() {
+      if (!safeThis || s != safeThis->synthHub.activeSynth()) return;   // one progress bar: the synth being edited
       auto& statusBar = safeThis->mainLayout->getStatusBar();
       if (done >= total)
         statusBar.clearProgress();
@@ -504,25 +635,32 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
         statusBar.setProgress(total > 0 ? static_cast<double>(done) / total : 0.0,
                               "Loading patch " + juce::String(done) + "/" + juce::String(total));
     });
-  });
+  }); });
 
   // A fetch that still misses sections after the automatic retries delivers a
   // patch without cables/parameters — editing or saving it would silently
   // corrupt the user's work, so warn loudly (issue #15).
-  connectionManager.setPatchLoadIncompleteCallback([this](int slot, int received, int total) {
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setPatchLoadIncompleteCallback([this, s](int localSlot, int received, int total) {
+    const int slot = SynthSlot::global(s, localSlot);
+    {
+      auto* info = new juce::DynamicObject();
+      info->setProperty("sectionsReceived", received);
+      info->setProperty("sectionsExpected", total);
+      mcpEventLog.record("patch_incomplete", slot, juce::var(info));
+    }
     juce::Component::SafePointer<MainComponent> safeThis(this);
     juce::MessageManager::callAsync([safeThis, slot, received, total]() {
       if (!safeThis) return;
       safeThis->mainLayout->getStatusBar().clearProgress();
       juce::AlertWindow::showMessageBoxAsync(
           juce::MessageBoxIconType::WarningIcon, "Incomplete Patch Load",
-          "Slot " + juce::String::charToString(static_cast<char>('A' + slot)) + " received only "
+          "Slot " + SynthSlot::label(slot) + " received only "
           + juce::String(received) + " of " + juce::String(total)
           + " patch sections from the synth (it may be too busy).\n\n"
           "Cables or parameters may be missing. Reload the patch from the synth "
           "before editing or saving it.");
     });
-  });
+  }); });
 
   // Wire morph knob assignments from header bar (same logic as canvas params)
   mainLayout->getHeaderBar().setKnobAssignCallback(
@@ -556,14 +694,14 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
       [this](int morphIndex, int keyboard) {
         if (!currentPatch()) return;
         currentPatch()->morphKeyboard[static_cast<size_t>(morphIndex)] = keyboard;
-        if (connectionManager.isConnected()) {
+        if (synthHub.isConnectedSlot(activeSlot)) {
           // Must address activeSlot, not the hardware-focused slot — every
           // sibling callback here was already updated to do this; this one
           // was missed (found in code review).
           MorphKeyboardAssignmentMessage msg(
-              connectionManager.getPatchId(activeSlot), morphIndex, keyboard);
-          auto sysex = msg.toSysEx(activeSlot);
-          connectionManager.sendAckedSysEx(sysex);
+              synthHub.getPatchId(activeSlot), morphIndex, keyboard);
+          auto sysex = msg.toSysEx(SynthHub::local(activeSlot));
+          synthHub.sendAckedSysEx(activeSlot, sysex);
         }
       });
 
@@ -572,7 +710,7 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
   // parameter=0-3
   mainLayout->getHeaderBar().setMorphChangeCallback(
       [this](int morphIndex, int value) {
-        connectionManager.sendParameter(activeSlot, 2, 1, morphIndex, value);
+        synthHub.sendParameterFromUser(activeSlot, 2, 1, morphIndex, value);
         // A knob assigned to this morph group has a cell in the floater showing
         // the value it drives, so dragging the dial has to move it there too
         // (issue #64). The header bar has already written the patch.
@@ -597,7 +735,7 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
       [this, voiceUploadGen = std::make_shared<int>(0)](int voices) {
         if (!currentPatch()) return;
         mainLayout->getStatusBar().showMessage("Voices: " + juce::String(voices), 2000);
-        if (!connectionManager.isConnected()) return;
+        if (!synthHub.active().isConnected()) return;
 
         const int gen = ++(*voiceUploadGen);
         auto capturedGen = voiceUploadGen;
@@ -611,14 +749,14 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
         auto attempt = std::make_shared<std::function<void()>>();
         *attempt = [safeThis, capturedGen, gen, attempt]() {
           if (!safeThis || *capturedGen != gen) return;  // superseded by a newer press
-          if (!safeThis->connectionManager.isConnected() || !safeThis->currentPatch()) return;
-          if (safeThis->connectionManager.isUploadingPatch()) {
+          if (!safeThis->synthHub.active().isConnected() || !safeThis->currentPatch()) return;
+          if (safeThis->synthHub.active().isUploadingPatch()) {
             // An upload (this slot's or another's) is mid-flight — try again shortly.
             juce::Timer::callAfterDelay(80, *attempt);
             return;
           }
-          safeThis->connectionManager.uploadPatch(
-              safeThis->connectionManager.getCurrentSlot(), *safeThis->currentPatch());
+          safeThis->synthHub.uploadPatch(
+              safeThis->synthHub.getCurrentSlot(), *safeThis->currentPatch());
         };
         juce::Timer::callAfterDelay(200, *attempt);
       });
@@ -647,14 +785,24 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
   // protocol ever sees it (MidiDeviceManager::handleIncomingMidiMessage), so
   // the extra callAsync only bought a copy of two 128-int arrays and a frame
   // of latency, on the one callback the synth sends many times a second.
-  connectionManager.setLightMeterCallback(
-      [this](const int lights[128], const int meters[128]) {
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setLightMeterCallback(
+      [this, s](const int lights[128], const int meters[128]) {
           JUCE_ASSERT_MESSAGE_THREAD
           // The synth streams lights/meters for the slot it has focused,
           // which the editor keeps in sync with activeSlot, so they belong
           // to that slot's canvas, whichever one the user is looking at.
-          canvasFor(activeSlot).setLightMeterData(lights, meters);
-      });
+          // A synth that is not the one being edited streams for its own focused slot.
+          const int lightSlot = (s == synthHub.activeSynth()) ? activeSlot
+                                                              : SynthSlot::global(s, synthHub.synth(s).getCurrentSlot());
+          canvasFor(lightSlot).setLightMeterData(lights, meters);
+          // Kept for the MCP bridge's read_lights. The callback only fires when
+          // a value changed, so the time is of the last change, not the last frame.
+          auto& frame = synthState[static_cast<size_t>(s)].lastLightFrame;
+          std::copy(lights, lights + 128, frame.lights.begin());
+          std::copy(meters, meters + 128, frame.meters.begin());
+          frame.slot = lightSlot;
+          frame.timeMs = juce::Time::currentTimeMillis();
+      }); });
 
   // Wire shake cables button
   mainLayout->getHeaderBar().setShakeCablesCallback(
@@ -671,8 +819,10 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
       [this](int index) { initSnapshot(index); });
   mainLayout->getHeaderBar().setMutatorButtonCallback(
       [this]() { toggleMutatorWindow(); });
-  mainLayout->getHeaderBar().setRetileButtonCallback(
-      [this]() { mainLayout->getPatchArea().resetTileOrder(); });
+  mainLayout->getHeaderBar().setSupportCallback(
+      [this](const juce::String& url) { openURL(url); });
+  mainLayout->getModuleIconBar().onRetile =
+      [this]() { mainLayout->getPatchArea().resetTileOrder(); };
 
   // Wire the Morph A/B fader
   mainLayout->getHeaderBar().setMorphFaderCallback(
@@ -689,25 +839,41 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
       [this]() { clearMorphKnobAssignment(); };
 
   // Wire parameter changes from synth to editor (user turns knob on hardware)
-  connectionManager.setParameterChangeCallback([this](int section, int moduleId,
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setParameterChangeCallback([this, s](int section, int moduleId,
                                                       int parameterId,
                                                       int value) {
+    // The knob is on the synth's own focused slot: the editor's active slot when this
+    // is the synth being edited, as before, or that synth's focused slot otherwise.
+    const int hwSlot = (s == synthHub.activeSynth()) ? activeSlot
+                                                     : SynthSlot::global(s, synthHub.synth(s).getCurrentSlot());
     juce::Component::SafePointer<MainComponent> safeThis(this);
-    juce::MessageManager::callAsync([safeThis, section, moduleId, parameterId,
+    juce::MessageManager::callAsync([safeThis, s, hwSlot, section, moduleId, parameterId,
                                      value]() {
       if (!safeThis) return;
-      if (safeThis->currentPatch() == nullptr)
+      auto* hwPatch = safeThis->slotPatches[hwSlot].get();
+      {
+        // A value the synth reported on its own: a front-panel knob, a morph
+        // dial or a MIDI controller. Section 2 module 1 is the morph groups.
+        auto* info = new juce::DynamicObject();
+        info->setProperty("section", section);
+        info->setProperty("containerIndex", moduleId);
+        info->setProperty("parameterId", parameterId);
+        info->setProperty("value", value);
+        safeThis->mcpEventLog.record("synth_parameter", hwSlot, juce::var(info));
+      }
+      if (hwPatch == nullptr)
         return;
+      const bool onActiveSynth = (s == safeThis->synthHub.activeSynth());
 
       // Morph A/B fader: Learn a physical panel knob as the drive source.
       // Panel-knob turns arrive here as (section, module, parameter, value).
-      if (safeThis->morphLearnArmed) {
+      if (onActiveSynth && safeThis->morphLearnArmed) {
         safeThis->morphKnobSection = section;
         safeThis->morphKnobModule = moduleId;
         safeThis->morphKnobParam = parameterId;
         safeThis->morphKnobMin = 0;
         safeThis->morphKnobMax = 127;
-        if (auto* mod = safeThis->currentPatch()->getContainer(section).getModuleByIndex(moduleId))
+        if (auto* mod = hwPatch->getContainer(section).getModuleByIndex(moduleId))
           if (auto* p = mod->getParameter(parameterId))
             if (auto* pd = p->getDescriptor()) {
               safeThis->morphKnobMin = pd->minValue;
@@ -721,7 +887,7 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
         return;
       }
       // Learned knob drives the morph position.
-      if (parameterId == safeThis->morphKnobParam && moduleId == safeThis->morphKnobModule
+      if (onActiveSynth && parameterId == safeThis->morphKnobParam && moduleId == safeThis->morphKnobModule
           && section == safeThis->morphKnobSection) {
         int span = juce::jmax(1, safeThis->morphKnobMax - safeThis->morphKnobMin);
         float t = juce::jlimit(0.0f, 1.0f,
@@ -734,8 +900,9 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
       // Morph section (section=2, module=1, parameter=0-3)
       if (section == 2 && moduleId == 1 && parameterId >= 0 &&
           parameterId < 4) {
-        safeThis->currentPatch()->morphValues[static_cast<size_t>(parameterId)] = value;
-        safeThis->mainLayout->getHeaderBar().repaint();
+        hwPatch->morphValues[static_cast<size_t>(parameterId)] = value;
+        if (hwSlot == safeThis->activeSlot)
+          safeThis->mainLayout->getHeaderBar().repaint();
         if (safeThis->knobFloaterWindow && safeThis->knobFloaterWindow->isVisible())
           safeThis->knobFloaterWindow->refresh();
         return;
@@ -743,10 +910,10 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
 
       // Skip if the user is currently dragging this exact parameter (avoid
       // fighting the user)
-      if (safeThis->canvasFor(safeThis->activeSlot).isDragging(section, moduleId, parameterId))
+      if (safeThis->canvasFor(hwSlot).isDragging(section, moduleId, parameterId))
         return;
 
-      auto &container = safeThis->currentPatch()->getContainer(section);
+      auto &container = hwPatch->getContainer(section);
       auto *module = container.getModuleByIndex(moduleId);
       if (module == nullptr)
         return;
@@ -759,43 +926,46 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
       // repaints)
       if (param->getValue() != value) {
         param->setValue(value);
-        safeThis->canvasFor(safeThis->activeSlot).repaintCanvas();
+        safeThis->canvasFor(hwSlot).repaintCanvas();
         if (safeThis->knobFloaterWindow && safeThis->knobFloaterWindow->isVisible())
           safeThis->knobFloaterWindow->refresh();
       }
     });
-  });
+  }); });
 
-  connectionManager.setSynthErrorCallback([this](int errorCode) {
-    juce::String description;
-    if (errorCode == 4)
-      description = "checksum error";
-    else if (errorCode == 5)
-      description = "no slot focused";
-    else
-      description = "unknown";
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setSynthErrorCallback([this, s](int errorCode) {
+    const juce::String description(synthErrorName(errorCode));
 
+    {
+      auto* info = new juce::DynamicObject();
+      info->setProperty("code", errorCode);
+      info->setProperty("description", description);
+      info->setProperty("synth", s);
+      mcpEventLog.record("synth_error", -1, juce::var(info));
+    }
     mainLayout->getStatusBar().showMessage(
-        "ERROR: Synth error code " + juce::String(errorCode)
+        "ERROR: " + (kMaxSynths > 1 ? "Synth " + juce::String(s + 1) + ": " : juce::String()) + "Synth error code " + juce::String(errorCode)
         + " (" + description + "): check console for details", 8000);
-  });
+  }); });
 
   // Wire toolbar buttons
-  mainLayout->onMidiSettingsClicked = [this]() { showMidiSettingsDialog(); };
 
-  // Chevron strips go through the same path as Ctrl+I / Ctrl+Shift+I so the
-  // status bar reports the change either way.
+  // The status bar's inspector and browser buttons go through the same path as Ctrl+I / Ctrl+Shift+I so
+  // the status bar reports the change either way.
   mainLayout->onPanelToggleRequested = [this](bool left) {
     if (left) toggleLeftPanel(); else toggleRightPanel();
   };
-  mainLayout->onLibraryFolderClicked = [this]() { choosePresetLibraryFolder(); };
-  mainLayout->onStoreToBankClicked = [this]() { storePatchToBank(); };
+  mainLayout->getStatusBar().onMidiClicked     = [this] { showMidiSettingsDialog(); };
+  mainLayout->getStatusBar().onSettingsClicked = [this] { showEditorOptionsDialog(); };
   mainLayout->getDiskPresetBrowser().setLibraryRoot(editorOptions.presetLibraryRoot);
   mainLayout->getDiskPresetBrowser().onPatchChosen = [this](const juce::File& file) {
     openPatchFileWithChooser(file);
   };
   mainLayout->getDiskPresetBrowser().onSnippetChosen = [this](const juce::File& file) {
     importSnippetFromFile(activeSlot, file);
+  };
+  mainLayout->getDiskPresetBrowser().onSetChosen = [this](const juce::File& file) {
+    loadSlotSet(file);
   };
   // Wire bug report button on header bar
   mainLayout->getHeaderBar().setReportBugCallback([this]() {
@@ -807,45 +977,71 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
     switchToSlot(slot);
   };
 
+  // A double-click on a synth's name renames it.
+  mainLayout->onSynthRenameRequested = [this](int synth) { renameSynth(synth); };
+
+  // A click on a synth's name: edit that synth, on the slot it has focused (or A).
+  mainLayout->onSynthSelected = [this](int synth) {
+    if (synth == synthHub.activeSynth())
+      return;
+    auto& cm = synthHub.synth(synth);
+    switchToSlot(SynthSlot::global(synth, cm.isConnected() ? cm.getCurrentSlot() : 0));
+  };
+
   // Right-click a slot row: show or hide that slot's sub-window in the work area
   mainLayout->onSlotViewToggled = [this](int slot) {
     toggleSlotOpen(slot);
   };
 
   // Wire slot enable state (fixed LEDs on hardware; several can be on at once)
-  connectionManager.setSlotsEnabledCallback([this](const std::array<bool, 4>& enabled) {
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setSlotsEnabledCallback([this, s](const std::array<bool, 4>& enabled) {
     juce::Component::SafePointer<MainComponent> safeThis(this);
-    juce::MessageManager::callAsync([safeThis, enabled]() {
+    juce::MessageManager::callAsync([safeThis, s, enabled]() {
       if (!safeThis) return;
-      safeThis->mainLayout->getSlotBar().setSlotsEnabled(enabled);
-      safeThis->lastEnabledSlots = enabled;
-      safeThis->slotEnableStateKnown = true;
+      safeThis->mainLayout->getSlotBar().setSlotsEnabled(s, enabled);
+      safeThis->synthState[static_cast<size_t>(s)].lastEnabled = enabled;
+      safeThis->synthState[static_cast<size_t>(s)].enableStateKnown = true;
+      {
+        juce::Array<juce::var> mask;
+        for (bool on : enabled)
+          mask.add(on);
+        auto* info = new juce::DynamicObject();
+        info->setProperty("enabled", mask);
+        info->setProperty("synth", s);
+        safeThis->mcpEventLog.record("slots_enabled", -1, juce::var(info));
+      }
       // Only the first mask of a connection touches the sub-windows.
-      safeThis->scheduleSlotWindowReconcile();
+      safeThis->scheduleSlotWindowReconcile(s);
     });
-  });
+  }); });
 
   // Clicking a slot's LED toggles its enable state on the synth (like holding
   // the slot button on the hardware). The LED updates when the synth confirms.
   mainLayout->getSlotBar().onSlotEnableToggled = [this](int slot) {
-    if (connectionManager.isConnected())
-      connectionManager.setSlotEnabled(slot, !connectionManager.isSlotEnabled(slot));
+    if (synthHub.isConnectedSlot(slot))
+      synthHub.setSlotEnabled(slot, !synthHub.isSlotEnabled(slot));
   };
 
   // Wire synth slot changes (user presses slot button on hardware)
-  connectionManager.setSlotChangedCallback([this](int slot) {
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setSlotChangedCallback([this, s](int localSlot) {
+    const int slot = SynthSlot::global(s, localSlot);
     juce::Component::SafePointer<MainComponent> safeThis(this);
-    juce::MessageManager::callAsync([safeThis, slot]() {
+    juce::MessageManager::callAsync([safeThis, s, slot]() {
       if (!safeThis) return;
       if (safeThis->pendingBrowserLoadSlot >= 0 && slot != safeThis->pendingBrowserLoadSlot) {
-        std::cout << "[SLOT] Ignoring stale slot change " << slot
-                  << " during browser load to slot " << safeThis->pendingBrowserLoadSlot << std::endl;
+        std::cout << "[SLOT] Ignoring stale slot change " << SynthSlot::label(slot)
+                  << " during browser load to slot " << SynthSlot::label(safeThis->pendingBrowserLoadSlot) << std::endl;
         return;
       }
+      safeThis->mcpEventLog.record("slot_focus", slot);
+      // A slot button pressed on a synth that is not the one being edited does not
+      // pull the editor over to it: the editor goes where the user clicks.
+      if (s != safeThis->synthHub.activeSynth())
+        return;
       safeThis->mainLayout->getSlotBar().setCurrentTab(slot);
       safeThis->switchToSlot(slot, /*notifySynth=*/false, /*bringOnScreen=*/false);
     });
-  });
+  }); });
 
   setSize(1280, 800);
 
@@ -864,6 +1060,52 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
   extrasFlushTimer = std::make_unique<ExtrasTimer>(*this);
   extrasFlushTimer->startTimer(3000);
 
+  // Up to 0.21.0, OK in MIDI Setup saved every port whose emulator had gone as switched off by
+  // hand (its device was no longer in the lists, which read as a change), and the editor never
+  // gave those ports to an emulator again: after a few emulators came and went, all of them
+  // looked taken. Once, such a port is handed back to the editor, as switched off by it.
+  if (auto* st = appProperties.getUserSettings();
+      st != nullptr && !st->getBoolValue("emulatorPortsRepaired", false)) {
+    for (int synth = 0; synth < kMaxSynths; ++synth)
+      if (DirectLink::isDeviceId(st->getValue(portKey("midiInputDevice", synth)))
+          && !st->getBoolValue(portKey("midiEnabled", synth), synth == 0)
+          && !st->getBoolValue(portKey("midiAutoOff", synth), false)) {
+        st->setValue(portKey("midiAutoOff", synth), true);
+        std::cout << "[LINK] Port " << (synth + 1) << " handed back to the emulators" << std::endl;
+      }
+    st->setValue("emulatorPortsRepaired", true);
+    st->saveIfNeeded();
+  }
+
+  // G1-Emu found on its own (#83): every few seconds, look for emulator instances on their direct
+  // link and give each free one a free port. The first look waits for the saved ports to be tried.
+  struct EmulatorScanTimer : public juce::Timer {
+    MainComponent& mc;
+    explicit EmulatorScanTimer(MainComponent& m) : mc(m) {}
+    void timerCallback() override { mc.scanForEmulators(); }
+  };
+  // Ctrl+T while a menu is open (or a dialog has the focus): those take the key press, so the keyboard
+  // itself is watched, and only when no window handled the press a moment ago
+  struct ThemeKeyTimer : public juce::Timer {
+    MainComponent& mc;
+    explicit ThemeKeyTimer(MainComponent& m) : mc(m) {}
+    void timerCallback() override
+    {
+      const bool down = juce::Process::isForegroundProcess()
+                     && juce::ModifierKeys::currentModifiers.isCommandDown()
+                     && juce::KeyPress::isKeyCurrentlyDown('t');
+      if (down && !mc.themeKeyWasDown
+          && juce::Time::getMillisecondCounter() - mc.lastThemeKeyMs > 400)
+        mc.cycleUiThemeFromKey();
+      mc.themeKeyWasDown = down;
+    }
+  };
+  themeKeyTimer = std::make_unique<ThemeKeyTimer>(*this);
+  themeKeyTimer->startTimer(40);
+
+  emulatorScanTimer = std::make_unique<EmulatorScanTimer>(*this);
+  emulatorScanTimer->startTimer(3000);
+
   // Auto-connect after UI is set up (with delay to let ALSA enumerate devices)
   {
     juce::Component::SafePointer<MainComponent> safeThis(this);
@@ -874,6 +1116,40 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
 
     // Reopen floater windows that were open last session
     juce::Timer::callAfterDelay(600, [safeThis]() { if (safeThis) safeThis->restoreFloaterWindows(); });
+
+    // NME_SNAPSHOT_SIZE=<w>x<h>: the picture-taking run first gives the window that size (for screenshots)
+    if (const auto snapSize = juce::SystemStats::getEnvironmentVariable("NME_SNAPSHOT_SIZE", {}); snapSize.isNotEmpty())
+      juce::Timer::callAfterDelay(800, [safeThis, snapSize]() {
+        if (safeThis == nullptr) return;
+        const int w = snapSize.upToFirstOccurrenceOf("x", false, false).getIntValue();
+        const int h = snapSize.fromFirstOccurrenceOf("x", false, false).getIntValue();
+        if (w > 200 && h > 200)
+          safeThis->getTopLevelComponent()->setSize(w, h);
+      });
+
+    // NME_SNAPSHOT_PATCH=<file.pch>: the picture-taking run opens that patch (editor only) first, so the
+    // inspector, the knobs and the floaters have something to show
+    if (const auto snapPatch = juce::SystemStats::getEnvironmentVariable("NME_SNAPSHOT_PATCH", {}); snapPatch.isNotEmpty())
+      juce::Timer::callAfterDelay(1500, [safeThis, snapPatch]() {
+        if (safeThis) safeThis->loadPatchFromFile(juce::File(snapPatch), safeThis->activeSlot, true);
+      });
+
+    // NME_SNAPSHOT_DIR=<folder>: save pictures of the editor and its floaters, then quit
+    if (const auto snapDir = juce::SystemStats::getEnvironmentVariable("NME_SNAPSHOT_DIR", {}); snapDir.isNotEmpty())
+      juce::Timer::callAfterDelay(3500, [safeThis, snapDir]() {
+        if (safeThis) safeThis->snapshotMenus(juce::File(snapDir), 0);
+      });
+
+    // Community themes (#91): the cached list now, the repository at most once a day.
+    loadCommunityIndexCache();
+    const auto dayMs = juce::int64(24) * 60 * 60 * 1000;
+    if (editorOptions.checkCommunityThemes
+        && juce::Time::currentTimeMillis() - editorOptions.communityThemesChecked > dayMs)
+      juce::Timer::callAfterDelay(4000, [safeThis]() { if (safeThis) safeThis->checkCommunityThemes(false); });
+    // New version notice (#97), on the same once-a-day footing.
+    if (editorOptions.checkNewVersion
+        && juce::Time::currentTimeMillis() - editorOptions.newVersionChecked > dayMs)
+      juce::Timer::callAfterDelay(5000, [safeThis]() { if (safeThis) safeThis->checkNewVersion(); });
   }
 
 #if NME_MCP_BRIDGE
@@ -883,7 +1159,10 @@ MainComponent::MainComponent(juce::ApplicationProperties &props)
 #endif
 
 #if JUCE_MAC
-  juce::MenuBarModel::setMacMainMenu(this);
+  // Only the app owns the macOS menu bar. Inside a DAW the menus stay in the
+  // editor's window: setting them here replaced the host's own menu bar (#95).
+  if (juce::JUCEApplicationBase::isStandaloneApp())
+    juce::MenuBarModel::setMacMainMenu(this);
 #endif
 }
 
@@ -914,24 +1193,27 @@ MainComponent::~MainComponent() {
 
   // Disconnect MIDI and clear all async callbacks to prevent post-destruction
   // dispatches (fixes crash-on-close in plugin builds)
-  connectionManager.disconnect();
-  connectionManager.setStatusCallback(nullptr);
-  connectionManager.setVoiceCountCallback(nullptr);
-  connectionManager.setPatchDataCallback(nullptr);
-  connectionManager.setParameterChangeCallback(nullptr);
-  connectionManager.setSynthErrorCallback(nullptr);
-  connectionManager.setSlotChangedCallback(nullptr);
-  connectionManager.setSlotsEnabledCallback(nullptr);
-  connectionManager.setUploadCompleteCallback(nullptr);
-  connectionManager.setLightMeterCallback(nullptr);
-  connectionManager.setPatchListCallback(nullptr);
-  connectionManager.setBankLocationCallback(nullptr);
-  connectionManager.setPatchLoadProgressCallback(nullptr);
-  connectionManager.setPatchLoadIncompleteCallback(nullptr);
+  synthHub.active().disconnect();
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setStatusCallback(nullptr); });
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setVoiceCountCallback(nullptr); });
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setPatchDataCallback(nullptr); });
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setParameterChangeCallback(nullptr); });
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setSynthErrorCallback(nullptr); });
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setSlotChangedCallback(nullptr); });
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setSlotsEnabledCallback(nullptr); });
+  slotSetLoadTimer.reset();
+  synthHub.active().setUploadCompleteCallback(nullptr);
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setUploadFailedCallback(nullptr); });
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setLightMeterCallback(nullptr); });
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setPatchListCallback(nullptr); });
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setBankLocationCallback(nullptr); });
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setPatchLoadProgressCallback(nullptr); });
+  forEachSynth([this](int s, ConnectionManager& cm) { cm.setPatchLoadIncompleteCallback(nullptr); });
 
   // Tear down UI before members are destroyed
 #if JUCE_MAC
-  juce::MenuBarModel::setMacMainMenu(nullptr);
+  if (juce::JUCEApplicationBase::isStandaloneApp())
+    juce::MenuBarModel::setMacMainMenu(nullptr);
 #endif
   // The slot chooser and the store-location dialog live on the desktop and are
   // owned by nobody, so quitting with one still open leaked it and printed an
@@ -946,6 +1228,9 @@ MainComponent::~MainComponent() {
   knobFloaterWindow.reset();
   keyboardFloaterWindow.reset();
   mainLayout.reset();
+  if (themesDialog != nullptr) themesDialog->dismiss();
+  if (--appLookAndFeelUsers == 0)
+    juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
 }
 
 void MainComponent::paint(juce::Graphics& g) {
@@ -959,7 +1244,7 @@ void MainComponent::resized() {
   auto area = getLocalBounds();
 
 #if !JUCE_MAC
-  menuBar->setBounds(area.removeFromTop(24));
+  menuBar->setBounds(area.removeFromTop(32));
 #endif
 
   mainLayout->setBounds(area);
@@ -1017,6 +1302,11 @@ bool MainComponent::keyPressed(const juce::KeyPress& key) {
     showEditorOptionsDialog();
     return true;
   }
+  if (key == juce::KeyPress('m', juce::ModifierKeys::commandModifier, 0))
+  {
+    showMidiSettingsDialog();
+    return true;
+  }
   if (key == juce::KeyPress('b', juce::ModifierKeys::commandModifier, 0))
   {
     togglePresetBrowser();
@@ -1024,9 +1314,7 @@ bool MainComponent::keyPressed(const juce::KeyPress& key) {
   }
   if (key == juce::KeyPress('t', juce::ModifierKeys::commandModifier, 0))
   {
-    applyUiTheme(editorOptions.uiThemeIndex + 1, true);
-    mainLayout->getStatusBar().showMessage(
-        "Theme: " + ThemeRegistry::get(editorOptions.uiThemeIndex).name, 2500);
+    cycleUiThemeFromKey();
     return true;
   }
   // On macOS the naked Cmd+W belongs to "close window" and fired both ways
@@ -1039,6 +1327,24 @@ bool MainComponent::keyPressed(const juce::KeyPress& key) {
  #endif
   {
     toggleWireframe();
+    return true;
+  }
+  // Hardware look rides the same modifier pattern as wireframe (Shift on macOS).
+  // Both cases of the key code are matched: the shifted variant reports the
+  // upper-case one on some platforms.
+  if (key.getModifiers().isCommandDown()
+      && (key.getKeyCode() == 'h' || key.getKeyCode() == 'H')
+ #if JUCE_MAC
+      && key.getModifiers().isShiftDown()
+ #endif
+      )
+  {
+    editorOptions.hardwareLook = !editorOptions.hardwareLook;
+    // Re-apply the current theme so the canvas rebuilds with the new flag; persist.
+    applyUiTheme(editorOptions.uiThemeIndex, true);
+    if (mainLayout)
+      mainLayout->getStatusBar().showMessage(
+          editorOptions.hardwareLook ? "Hardware look: on" : "Hardware look: off", 2000);
     return true;
   }
   // Ctrl+I hides the left panel, Ctrl+Shift+I the right one (issue #38).
@@ -1077,7 +1383,7 @@ bool MainComponent::keyPressed(const juce::KeyPress& key) {
    #endif
     if (slot >= 0)
     {
-      toggleSlotOpen(slot);
+      toggleSlotOpen(SynthSlot::global(synthHub.activeSynth(), slot));   // the digits are the active synth's slots
       return true;
     }
   }
@@ -1113,7 +1419,12 @@ bool MainComponent::keyPressed(const juce::KeyPress& key) {
 }
 
 juce::StringArray MainComponent::getMenuBarNames() {
-  return {"File", "Edit", "View", "Device", "Help", "About"};
+  // A dot on View while there are community themes the user has not seen (#91), like
+  // VCV Rack's library. Menus are picked by index, so the changed name is harmless.
+  const juce::String view = communityNewCount() > 0 ? "View" + AppLookAndFeel::newMarker() : "View";
+  // And on About while a newer version is out that the user has not looked at (#97).
+  const juce::String about = newVersionUnseen() ? "About" + AppLookAndFeel::newMarker() : "About";
+  return {"File", "Edit", view, "Device", "Help", about};
 }
 
 #if JUCE_MAC
@@ -1188,6 +1499,9 @@ juce::PopupMenu MainComponent::getMenuForIndex(int menuIndex,
     addShortcutItem(menu, 3, "Save", "Ctrl+S");
     addShortcutItem(menu, 4, "Save As...", "Ctrl+Shift+S");
     menu.addSeparator();
+    menu.addItem(13, "Open Slot Set...");
+    menu.addItem(12, "Save Slot Set...");
+    menu.addSeparator();
     menu.addItem(5, "Import Snippet...", currentPatch() != nullptr);
     addShortcutItem(menu, 6, "Preset Browser...", "Ctrl+B");
     menu.addSeparator();
@@ -1222,35 +1536,26 @@ juce::PopupMenu MainComponent::getMenuForIndex(int menuIndex,
     addShortcutItem(menu, 60, "Zoom In", "Ctrl++");
     addShortcutItem(menu, 61, "Zoom Out", "Ctrl+-");
     addShortcutItem(menu, 62, "Reset Zoom (100%)", "Shift+Z");
-    addShortcutItem(menu, 63, "Zoom to Selection", "Z", !activeCanvas().isDragging(0, 0, 0));  // always enabled
+    addShortcutItem(menu, 63, "Zoom to Selection (again: back)", "Z", !activeCanvas().isDragging(0, 0, 0));  // always enabled
     menu.addSeparator();
     juce::String zoomLabel = "Zoom: " + juce::String(juce::roundToInt(zoom * 100)) + "%";
     menu.addItem(-1, zoomLabel, false);
     menu.addSeparator();
     addShortcutItem(menu, 64, "Shake Cables", "S");
     menu.addSeparator();
-    juce::PopupMenu themeMenu;
-    for (int i = 0; i < ThemeRegistry::count(); ++i)  // ids 200+ reserved for themes
-      themeMenu.addItem(200 + i, ThemeRegistry::get(i).name, true,
-                        i == editorOptions.uiThemeIndex);
-    {
-      // A submenu with a shortcut hint needs the Item form: addSubMenu has no
-      // shortcut field, and Ctrl+T cycling the theme is worth advertising.
-     #if JUCE_MAC
-      juce::PopupMenu::Item themeItem("Theme   " + macShortcutSymbols("Ctrl+T"));
-     #else
-      juce::PopupMenu::Item themeItem("Theme");
-     #endif
-      themeItem.subMenu = std::make_unique<juce::PopupMenu>(themeMenu);
-      themeItem.shortcutKeyDescription = "Ctrl+T";
-      menu.addItem(std::move(themeItem));
-    }
+    // Every theme choice and option lives in one window (ThemesDialog); Ctrl+T still cycles
+    if (communityNewCount() > 0)
+      menu.addItem(197, "Themes...", true, false, AppLookAndFeel::newDot());
+    else
+      menu.addItem(197, "Themes...");
     // Cmd+W is "close window" on macOS and the system wins the argument, so
     // wireframe rides with Shift there (issue #55).
    #if JUCE_MAC
     addShortcutItem(menu, 66, "Wireframe Modules", "Cmd+Shift+W", true, editorOptions.wireframe);
+    addShortcutItem(menu, 65, "Hardware Look", "Cmd+Shift+H", true, editorOptions.hardwareLook);
    #else
     addShortcutItem(menu, 66, "Wireframe Modules", "Ctrl+W", true, editorOptions.wireframe);
+    addShortcutItem(menu, 65, "Hardware Look", "Ctrl+H", true, editorOptions.hardwareLook);
    #endif
     menu.addSeparator();
 
@@ -1258,15 +1563,20 @@ juce::PopupMenu MainComponent::getMenuForIndex(int menuIndex,
     juce::PopupMenu slotMenu;
     for (int i = 0; i < numSlots; ++i)
     {
-        auto letter = juce::String::charToString(static_cast<char>('A' + i));
+        if (!isSynthShown(SynthSlot::synthOf(i)) || !slotExists(i))
+            continue;   // a synth that is not there has no slots to show, nor has a Micro its B-D
+        auto letter = SynthSlot::label(i);
         auto name = slotPatches[i] ? slotPatches[i]->getName() : juce::String("empty");
-        addShortcutItem(slotMenu, 90 + i, "Slot " + letter + " - " + name,
-                        NME_SLOT_TOGGLE_CHORD + juce::String(i + 1),
+        // Ctrl+Shift+1..4 are the active synth's four slots; the others have the menu.
+        addShortcutItem(slotMenu, kSlotMenuIdBase + i, "Slot " + letter + " - " + name,
+                        SynthSlot::synthOf(i) == synthHub.activeSynth()
+                            ? NME_SLOT_TOGGLE_CHORD + juce::String(SynthSlot::localOf(i) + 1)
+                            : juce::String(),
                         true, patchArea.isSlotOpen(i));
     }
     slotMenu.addSeparator();
     const bool severalOpen = patchArea.getNumOpenSlots() > 1;
-    const bool grid = patchArea.getNumOpenSlots() == 4;  // up/down only exist in the 2x2
+    const bool grid = patchArea.getNumOpenSlots() >= 4;  // up/down only exist in a grid
     addShortcutItem(slotMenu, 96, "Move Slot Left", "Ctrl+Shift+Left", severalOpen);
     addShortcutItem(slotMenu, 97, "Move Slot Right", "Ctrl+Shift+Right", severalOpen);
     addShortcutItem(slotMenu, 99, "Move Slot Up", "Ctrl+Shift+Up", grid);
@@ -1316,9 +1626,10 @@ juce::PopupMenu MainComponent::getMenuForIndex(int menuIndex,
   }
   else if (menuIndex == 3) // Device
   {
-    menu.addItem(30, "MIDI Settings...");
+    addShortcutItem(menu, 30, "MIDI Settings...", "Ctrl+M");
+    menu.addItem(37, "Connect to G1-Emu Automatically", true, autoConnectEmulatorsEnabled());
     menu.addSeparator();
-    bool connected = connectionManager.isConnected();
+    bool connected = synthHub.active().isConnected();
     menu.addItem(31, "Request Patch from Synth", connected);
     menu.addItem(32, "Send Controller Snapshot", connected);
     menu.addItem(33, "Store to Bank...", connected);
@@ -1326,6 +1637,8 @@ juce::PopupMenu MainComponent::getMenuForIndex(int menuIndex,
     menu.addItem(34, "Save Bank to Disk...", connected);
     menu.addItem(35, "Send Bank to Synth...", connected);
     menu.addItem(36, "Backup All Banks to Library...", connected);
+    menu.addSeparator();
+    menu.addItem(38, "Update Synth OS...", true);
   }
   else if (menuIndex == 4) // Help
   {
@@ -1340,10 +1653,19 @@ juce::PopupMenu MainComponent::getMenuForIndex(int menuIndex,
   }
   else if (menuIndex == 5) // About
   {
+    if (newVersionOut()) {
+      const juce::String text = "Version " + editorOptions.latestVersion + " is out: get it on Patreon";
+      if (newVersionUnseen())
+        menu.addItem(55, text, true, false, AppLookAndFeel::newDot());
+      else
+        menu.addItem(55, text);
+      menu.addSeparator();
+    }
     menu.addItem(54, "About Animatek NME...", true);
     menu.addSeparator();
     menu.addItem(53, "Animatek NME Website", true);
     menu.addItem(50, "Support the Project (Patreon)", true);
+    menu.addItem(56, "Donate (PayPal)...", true);
     menu.addItem(51, "Source Code (GitHub)", true);
     menu.addItem(52, "animatek.net", true);
   }
@@ -1383,6 +1705,12 @@ void MainComponent::menuItemSelected(int menuItemID, int) {
     break;
   case 4:
     saveSlotPatchAs(activeSlot);
+    break;
+  case 12:
+    saveSlotSet();
+    break;
+  case 13:
+    openSlotSetWithChooser();
     break;
   case 5:
     importSnippet();
@@ -1434,11 +1762,21 @@ void MainComponent::menuItemSelected(int menuItemID, int) {
   case 30:
     showMidiSettingsDialog();
     break;
+  case 37:
+    if (auto* st = appProperties.getUserSettings()) {
+      st->setValue("autoConnectG1Emu", !autoConnectEmulatorsEnabled());
+      st->saveIfNeeded();
+    }
+    mainLayout->getStatusBar().showMessage(autoConnectEmulatorsEnabled()
+        ? "G1-Emu instances will be connected as they appear"
+        : "G1-Emu is only connected from MIDI Settings", 3000);
+    menuItemsChanged();
+    break;
   case 31:
-    connectionManager.requestPatch(connectionManager.getCurrentSlot());
+    synthHub.requestPatch(synthHub.getCurrentSlot());
     break;
   case 32:
-    connectionManager.sendControllerSnapshot();
+    synthHub.active().sendControllerSnapshot();
     mainLayout->getStatusBar().showMessage(
         "Controller snapshot sent - the synth emits assigned CC values on its DIN MIDI OUT (not the PC port)", 5000);
     break;
@@ -1447,11 +1785,14 @@ void MainComponent::menuItemSelected(int menuItemID, int) {
     break;
   case 34:
     BankTransferDialog::show(this, BankTransferDialog::Mode::SaveToDisk,
-                             bankTransfer, connectionManager);
+                             bankTransfer, synthHub.active());
     break;
   case 35:
     BankTransferDialog::show(this, BankTransferDialog::Mode::SendToSynth,
-                             bankTransfer, connectionManager);
+                             bankTransfer, synthHub.active());
+    break;
+  case 38:
+    OsUpdateDialog::show(this, synthHub);
     break;
   case 36:
     if (editorOptions.presetLibraryRoot == juce::File()) {
@@ -1461,7 +1802,7 @@ void MainComponent::menuItemSelected(int menuItemID, int) {
     } else {
       editorOptions.ensureLibraryFolders();
       BankTransferDialog::show(this, BankTransferDialog::Mode::BackupAllBanks,
-                               bankTransfer, connectionManager,
+                               bankTransfer, synthHub.active(),
                                editorOptions.getBanksFolder());
     }
     break;
@@ -1495,7 +1836,16 @@ void MainComponent::menuItemSelected(int menuItemID, int) {
     openURL("https://animatek.net/animatek-nme-eng/");
     break;
   case 50:  // Patreon
-    openURL("https://www.patreon.com/collection/2038913");
+    openURL(VersionCheck::kPatreonUrl);
+    break;
+  case 55:  // A new version is out (#97): the dot goes, the item stays until it is installed
+    openURL(VersionCheck::kPatreonUrl);
+    editorOptions.newVersionSeen = editorOptions.latestVersion;
+    editorOptions.save(appProperties.getUserSettings());
+    menuItemsChanged();
+    break;
+  case 56:  // Donate
+    openURL(VersionCheck::kDonateUrl);
     break;
   case 51:  // GitHub
     openURL("https://github.com/animatek/Animatek-NME/");
@@ -1514,14 +1864,22 @@ void MainComponent::menuItemSelected(int menuItemID, int) {
   case 62:  // Reset Zoom
     activeCanvas().resetZoom();
     break;
-  case 63:  // Zoom to Selection
-    activeCanvas().zoomToSelection();
+  case 63:  // Zoom to Selection (again: back to where it was)
+    activeCanvas().toggleZoomToSelection();
     break;
   case 64:  // Shake Cables
     activeCanvas().shakeCables();
     break;
   case 66:  // Wireframe Modules
     toggleWireframe();
+    break;
+  case 65:  // Hardware Look
+    editorOptions.hardwareLook = !editorOptions.hardwareLook;
+    // Re-apply the current theme so the canvas rebuilds with the new flag; persist.
+    applyUiTheme(editorOptions.uiThemeIndex, true);
+    if (mainLayout)
+      mainLayout->getStatusBar().showMessage(
+          editorOptions.hardwareLook ? "Hardware look: on" : "Hardware look: off", 2000);
     break;
   // Overlays: same toggles as F5 and F7-F10, so picking the mode that is
   // already showing turns it off again.
@@ -1567,9 +1925,6 @@ void MainComponent::menuItemSelected(int menuItemID, int) {
   case 84:  // SysEx Monitor
     toggleSysexMonitor();
     break;
-  case 90: case 91: case 92: case 93:  // show/hide slot A..D
-    toggleSlotOpen(menuItemID - 90);
-    break;
   case 94:  // Tile Slots
     mainLayout->getPatchArea().retile();
     mainLayout->getStatusBar().showMessage("Slots tiled", 2000);
@@ -1597,15 +1952,78 @@ void MainComponent::menuItemSelected(int menuItemID, int) {
     mainLayout->getStatusBar().showMessage("Slots back in ABCD order", 2000);
     break;
 
+  case 190:  // Save the current theme as a file the user can edit (#90)
+  {
+    const auto folder = ThemeFile::userFolder();
+    folder.createDirectory();
+    const auto& cur = ThemeRegistry::get(editorOptions.uiThemeIndex);
+    // A copy with its own name, so it appears beside the original after a reload.
+    EditorTheme copy = cur;
+    copy.name = cur.name + " copy";
+    auto file = folder.getChildFile(juce::File::createLegalFileName(copy.name) + ".json");
+    for (int n = 2; file.existsAsFile(); ++n)
+    {
+      copy.name = cur.name + " copy " + juce::String(n);
+      file = folder.getChildFile(juce::File::createLegalFileName(copy.name) + ".json");
+    }
+    // Missing keys fall back to a built-in: the theme itself, or Dark for a user theme.
+    const auto json = ThemeFile::toJson(copy, ThemeRegistry::findBuiltin(cur.name) != nullptr ? cur.name : "Dark");
+    if (file.replaceWithText(json))
+    {
+      ThemeRegistry::reloadUserThemes();
+      applyUiTheme(ThemeRegistry::indexOfName(cur.name), false);
+      mainLayout->getStatusBar().showMessage("Saved " + file.getFullPathName() + "  (edit it, then Reload Theme Files)", 6000);
+      file.revealToUser();
+    }
+    else
+      mainLayout->getStatusBar().showMessage("Could not write " + file.getFullPathName(), 4000);
+    break;
+  }
+  case 191:  // Reload theme files
+  {
+    const auto current = ThemeRegistry::get(editorOptions.uiThemeIndex).name;
+    ThemeRegistry::reloadUserThemes();
+    const int idx = ThemeRegistry::indexOfName(current);
+    applyUiTheme(idx >= 0 ? idx : editorOptions.uiThemeIndex, true);
+    syncThemesDialog();
+    mainLayout->getStatusBar().showMessage("Themes reloaded: " + juce::String(ThemeRegistry::count() - ThemeRegistry::builtinCount())
+                                           + " user theme(s)", 3000);
+    break;
+  }
+  case 197:  // View > Themes...: opens the window, or closes it if it is open
+    if (themesDialog != nullptr)
+      themesDialog->dismiss();
+    else
+      showThemesDialog(ThemesDialog::Themes);
+    break;
+  case 193:
+    showThemeEditor();
+    break;
+  case 194:
+    importThemeFile();
+    break;
+  case 196:
+    showCommunityThemes();
+    break;
+  case 195:
+    exportCurrentTheme();
+    break;
+  case 192:  // Open the themes folder
+    ThemeFile::userFolder().createDirectory();
+    ThemeFile::userFolder().startAsProcess();
+    break;
+
   default:
-    if (menuItemID >= 200 && menuItemID < 200 + ThemeRegistry::count())
-      applyUiTheme(menuItemID - 200, true);
+    if (menuItemID >= kSlotMenuIdBase && menuItemID < kSlotMenuIdBase + numSlots)
+      toggleSlotOpen(menuItemID - kSlotMenuIdBase);   // show/hide a slot
+    else if (menuItemID >= 200 && menuItemID < 200 + ThemeRegistry::count())
+      chooseUiTheme(menuItemID - 200);
     break;
   }
 }
 
 void MainComponent::switchToSlot(int slot, bool notifySynth, bool bringOnScreen) {
-  if (slot < 0 || slot >= numSlots)
+  if (!slotExists(slot))
     return;
 
   // Bringing the slot on screen focuses its sub-window, which reports back
@@ -1634,8 +2052,8 @@ void MainComponent::switchToSlot(int slot, bool notifySynth, bool bringOnScreen)
 
   if (slot == activeSlot) {
     mainLayout->getSlotBar().setCurrentTab(slot);
-    if (notifySynth && connectionManager.isConnected()
-        && connectionManager.getCurrentSlot() != slot) {
+    if (notifySynth && synthHub.isConnectedSlot(slot)
+        && synthHub.synth(SynthSlot::synthOf(slot)).getCurrentSlot() != SynthSlot::localOf(slot)) {
       stopInterpolation("synth slot realignment");
       notifySynthOfSlot(slot);
     }
@@ -1653,6 +2071,13 @@ void MainComponent::switchToSlot(int slot, bool notifySynth, bool bringOnScreen)
 
   activeSlot = slot;
   mainLayout->getSlotBar().setCurrentTab(slot);
+
+  // Moving to a slot of another synth makes that synth the one being edited: the
+  // browser, the status bar and the header follow it.
+  if (SynthSlot::synthOf(slot) != synthHub.activeSynth()) {
+    synthHub.setActiveSynth(SynthSlot::synthOf(slot));
+    refreshForActiveSynth();
+  }
 
   // Tell synth to switch active slot (skip when the synth itself initiated the change)
   if (notifySynth)
@@ -1686,19 +2111,17 @@ void MainComponent::switchToSlot(int slot, bool notifySynth, bool bringOnScreen)
     resetMorphAB();  // A/B captures belong to the previous slot's patch
     refreshSnapshotUi();
 
-    const char* slotNames[] = {"A", "B", "C", "D"};
     mainLayout->getStatusBar().setConnectionStatus(
-        juce::String("Slot ") + slotNames[slot] + " - " + currentPatch()->getName(),
-        connectionManager.isConnected());
+        juce::String("Slot ") + SynthSlot::label(slot) + " - " + currentPatch()->getName(),
+        synthHub.isConnectedSlot(slot));
   } else {
     mainLayout->getHeaderBar().setPatch(nullptr);
     mainLayout->getInspector().setPatch(nullptr);
     updateDspLoadDisplay();
 
-    const char* slotNames[] = {"A", "B", "C", "D"};
     mainLayout->getStatusBar().setConnectionStatus(
-        juce::String("Slot ") + slotNames[slot] + " - empty",
-        connectionManager.isConnected());
+        juce::String("Slot ") + SynthSlot::label(slot) + " - empty",
+        synthHub.isConnectedSlot(slot));
 
     // If connected, the synth echoes our SlotActivated command as a
     // notification, whose handler auto-requests the patch with clean
@@ -1706,17 +2129,17 @@ void MainComponent::switchToSlot(int slot, bool notifySynth, bool bringOnScreen)
     // immediately raced the slot-command ACKs: the first ACK back (for
     // SlotsSelected) was mistaken for the patch-request ACK and the fetch
     // derailed. Keep only a delayed fallback in case the echo never comes.
-    if (connectionManager.isConnected()) {
+    if (synthHub.isConnectedSlot(slot)) {
       juce::Component::SafePointer<MainComponent> safeThis(this);
       juce::Timer::callAfterDelay(500, [safeThis, slot]() {
         if (!safeThis) return;
         if (safeThis->activeSlot != slot) return;
         if (safeThis->currentPatch() != nullptr) return;
-        if (!safeThis->connectionManager.isConnected()) return;
-        if (safeThis->connectionManager.isFetchingPatch()) return;
+        if (!safeThis->synthHub.isConnectedSlot(slot)) return;
+        if (safeThis->synthHub.isFetchingPatch(slot)) return;
         std::cout << "[SLOT] No SlotActivated echo - fallback patch request for slot "
                   << slot << std::endl;
-        safeThis->connectionManager.requestPatch(slot);
+        safeThis->synthHub.requestPatch(slot);
       });
     }
   }
@@ -1727,12 +2150,184 @@ void MainComponent::switchToSlot(int slot, bool notifySynth, bool bringOnScreen)
   std::cout << "[SLOT] Switched to slot " << slot << std::endl;
 }
 
+// The surfaces that show one synth's state follow the synth being edited: the status
+// bar, the header, the bank in the patch browser and the store button.
+// The synth's own name, the one it answers to, lives in its Synth Settings: renaming it is
+// sending those settings back with the new name, as the Synth Settings dialog does. Each G1-Emu
+// instance keeps its own (in its flash: flash.bin, or the DAW project for the plugin), which is
+// what tells them apart.
+void MainComponent::renameSynth(int synth) {
+  auto& cm = synthHub.synth(synth);
+  const auto& state = synthState[static_cast<size_t>(synth)];
+  if (!cm.isConnected())
+    return;
+  if (!state.settingsKnown) {
+    // Everything else in the settings has to go back as it is, so it has to be known first.
+    cm.requestSynthSettings();
+    mainLayout->getStatusBar().showMessage("Reading the synth's settings: try again in a moment", 3000);
+    return;
+  }
+
+  auto* dialog = new juce::AlertWindow("Rename Synth",
+                                       "The name the synth answers to (up to 16 characters).",
+                                       juce::MessageBoxIconType::NoIcon, this);
+  dialog->addTextEditor("name", juce::String(state.settings.name));
+  if (auto* editor = dialog->getTextEditor("name"))
+    editor->setInputRestrictions(16);
+  dialog->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
+  dialog->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+
+  juce::Component::SafePointer<MainComponent> safeThis(this);
+  juce::Component::SafePointer<juce::AlertWindow> safeDialog(dialog);
+  dialog->enterModalState(true, juce::ModalCallbackFunction::create([safeThis, safeDialog, synth](int result) {
+    if (result != 1 || safeThis == nullptr || safeDialog == nullptr)
+      return;
+    // The G1 shows plain ASCII; anything else would come back as garbage on its display.
+    juce::String name;
+    for (auto c : safeDialog->getTextEditorContents("name").trim())
+      if (c >= 32 && c < 127)
+        name += juce::String::charToString(c);
+    name = name.substring(0, 16).trim();
+    if (name.isEmpty())
+      return;
+    auto& cm2 = safeThis->synthHub.synth(synth);
+    auto& st = safeThis->synthState[static_cast<size_t>(synth)];
+    if (!cm2.isConnected() || !st.settingsKnown)
+      return;
+    st.settings.name = name.toStdString();
+    cm2.sendSynthSettings(st.settings);
+    safeThis->setSynthDisplayName(synth, name);
+    if (synth == safeThis->synthHub.activeSynth())
+      safeThis->mainLayout->getHeaderBar().setSynthName(name);
+    safeThis->mainLayout->getStatusBar().showMessage("Synth renamed: " + name, 2500);
+  }), true);
+}
+
+bool MainComponent::giveDuplicateEmulatorAName(int synth) {
+  auto& state = synthState[static_cast<size_t>(synth)];
+  auto& cm = synthHub.synth(synth);
+  if (!cm.isConnected() || !DirectLink::isDeviceId(state.lastInputId))
+    return false;
+  auto* st = appProperties.getUserSettings();
+  if (st == nullptr || !st->getBoolValue(portKey("midiAutoPort", synth), false))
+    return false;
+  // Once per connection: a synth that comes back with its old name keeps it, rather than being
+  // renamed again and again.
+  if (state.autoNameTried)
+    return false;
+  // And only once the synth has a patch in its focused slot: settings sent before that carry no
+  // patch id, and the synth ignores them. The next patch to arrive tries again.
+  if (cm.getPatchId(cm.getCurrentSlot()) <= 0)
+    return false;
+
+  juce::StringArray taken;
+  for (int other = 0; other < kMaxSynths; ++other)
+    if (other != synth && synthHub.synth(other).isConnected()
+        && synthState[static_cast<size_t>(other)].settingsKnown)
+      taken.add(juce::String(synthState[static_cast<size_t>(other)].settings.name).trim());
+  const juce::String current = juce::String(state.settings.name).trim();
+  // Every emulator gets a name of its own, the first one too: one still called what it was called
+  // at the factory ("Modular", the name in the G1's OS) is renamed like one that repeats another
+  // synth's name. A name of its own, given here or by the user, is kept, so it does not change
+  // every time the project opens.
+  const bool factoryName = current.isEmpty() || current.equalsIgnoreCase("Modular")
+                        || current.equalsIgnoreCase("Nord Modular");
+  if (!factoryName && !taken.contains(current, true))
+    return false;
+
+  // Short, plain ASCII (the G1's display) and at most 16 characters.
+  static const char* const kNames[] = {
+    "G1 Basalt", "G1 Nebula", "G1 Amber", "G1 Cobalt", "G1 Quartz", "G1 Ember", "G1 Cirrus",
+    "G1 Onyx", "G1 Saffron", "G1 Tundra", "G1 Mistral", "G1 Indigo", "G1 Copper", "G1 Lagoon",
+    "G1 Graphite", "G1 Sierra", "G1 Ozone", "G1 Pulsar", "G1 Ferro", "G1 Vapor", "G1 Delta",
+    "G1 Garnet", "G1 Harbor", "G1 Kelvin", "G1 Lumen", "G1 Magma", "G1 Orbit", "G1 Prism" };
+  juce::Random random;
+  juce::String name;
+  for (int tries = 0; tries < 64 && name.isEmpty(); ++tries) {
+    const juce::String candidate(kNames[random.nextInt(static_cast<int>(std::size(kNames)))]);
+    if (!taken.contains(candidate, true) && candidate != current)
+      name = candidate;
+  }
+  if (name.isEmpty())
+    return false;
+
+  state.autoNameTried = true;
+  std::cout << "[LINK] Port " << (synth + 1) << " answers to \"" << current
+            << "\" (" << (factoryName ? "its factory name" : "another synth's name") << "): renaming it \""
+            << name << "\"" << std::endl;
+  state.settings.name = name.toStdString();
+  cm.sendSynthSettings(state.settings);
+  setSynthDisplayName(synth, name);
+  if (synth == synthHub.activeSynth())
+    mainLayout->getHeaderBar().setSynthName(name);
+  mainLayout->getStatusBar().showMessage("G1-Emu on Port " + juce::String(synth + 1) + " is \"" + name
+                                             + "\" now (double-click its name to change it)", 4000);
+  return true;
+}
+
+void MainComponent::setSynthDisplayName(int synth, const juce::String& name) {
+  mainLayout->getSlotBar().setSynthName(synth, name);
+  for (int l = 0; l < kSlotsPerSynth; ++l)
+    mainLayout->getPatchArea().getView(SynthSlot::global(synth, l)).setSynthName(name);
+}
+
+// A synth gets its row in the slot bar, and its slots in the View menu, while it is connected or
+// connecting, or being edited. Port 1 too: with the only synth on Port 2 its row was a "No synth"
+// above the real one. The synth being edited always has its row, so the bar is never empty.
+bool MainComponent::isSynthShown(int synth) const {
+  if (synth == synthHub.activeSynth())
+    return true;
+  const auto& cm = synthHub.synth(synth);
+  return cm.isConnected() || cm.getStatus().state == ConnectionManager::State::Connecting;
+}
+
+int MainComponent::slotsOfSynth(int synth) const {
+  return synthHub.synth(synth).slotCount();
+}
+
+bool MainComponent::slotExists(int slot) const {
+  return slot >= 0 && slot < numSlots
+      && SynthSlot::localOf(slot) < slotsOfSynth(SynthSlot::synthOf(slot));
+}
+
+void MainComponent::updateSlotBarRows() {
+  for (int synth = 0; synth < kMaxSynths; ++synth)
+    mainLayout->getSlotBar().setRowShown(synth, isSynthShown(synth));
+}
+
+void MainComponent::refreshForActiveSynth() {
+  updateSlotBarRows();
+  const int synth = synthHub.activeSynth();
+  auto& cm = synthHub.synth(synth);
+  bankTransfer.retarget(cm);
+  const auto& state = synthState[static_cast<size_t>(synth)];
+  const bool connected = cm.isConnected();
+
+  mainLayout->getStatusBar().setSynthLink(SynthLink::describe(connected, cm.getConnectedPortName()));
+  if (!connected) {
+    mainLayout->getHeaderBar().setSynthName({});
+    mainLayout->getHeaderBar().setSynthDspLoad(-1, -1, -1, -1);
+    mainLayout->getStatusBar().setVoiceCount(0);
+  } else {
+    mainLayout->getHeaderBar().setSynthName(state.settingsKnown && !state.settings.name.empty()
+                                                ? juce::String(state.settings.name)
+                                                : juce::String("Nord Modular"));
+    const auto& v = state.voiceCounts;
+    mainLayout->getHeaderBar().setSynthDspLoad(v[0], v[1], v[2], v[3]);
+    mainLayout->getStatusBar().setVoiceCount(v[0] + v[1] + v[2] + v[3]);
+  }
+  mainLayout->getPatchBrowser().setPatchList(cm.getPatchList());
+  mainLayout->getPatchBrowser().setLoadingState(cm.isConnected() && !cm.isPatchListLoaded());
+  menuItemsChanged();
+  updateStoreLocationDisplay();
+}
+
 // Walking focus across four sub-windows must not spray SlotActivated messages
 // down the wire, so the send is coalesced: only the last slot asked for within
 // the window is actually told to the synth, and only if the synth is not
 // already there.
 void MainComponent::notifySynthOfSlot(int slot) {
-  if (!connectionManager.isConnected())
+  if (!synthHub.isConnectedSlot(slot))
     return;
 
   pendingSynthSlot = slot;
@@ -1742,11 +2337,11 @@ void MainComponent::notifySynthOfSlot(int slot) {
     if (!safeThis || safeThis->synthSlotGeneration != generation)
       return;  // superseded by a later focus change
     const int target = safeThis->pendingSynthSlot;
-    if (target < 0 || !safeThis->connectionManager.isConnected())
+    if (target < 0 || !safeThis->synthHub.isConnectedSlot(target))
       return;
-    if (safeThis->connectionManager.getCurrentSlot() == target)
+    if (safeThis->synthHub.synth(SynthSlot::synthOf(target)).getCurrentSlot() == SynthSlot::localOf(target))
       return;  // the synth is already there
-    safeThis->connectionManager.selectSlot(target);
+    safeThis->synthHub.selectSlot(target);
   });
 }
 
@@ -1771,7 +2366,7 @@ void MainComponent::toggleFocusMode() {
 }
 
 void MainComponent::toggleSlotOpen(int slot) {
-  if (slot < 0 || slot >= numSlots)
+  if (!slotExists(slot))
     return;
 
   auto& area = mainLayout->getPatchArea();
@@ -1790,18 +2385,18 @@ bool MainComponent::replacePatchInSlot(int slot, std::unique_ptr<Patch> patch,
                                        const juce::File& sourceFile, bool activate,
                                        bool loadVariations, juce::String& error) {
   if (slot < 0 || slot >= numSlots) {
-    error = "slot must be 0-3 (A-D)";
+    error = "slot out of range";
     return false;
   }
   if (!patch) {
     error = "The replacement patch is invalid";
     return false;
   }
-  if (connectionManager.isUploadingPatch() || connectionManager.isFetchingPatch()) {
+  if (synthHub.isUploadingPatch(slot) || synthHub.isFetchingPatch(slot)) {
     error = "A patch transfer is already in progress; retry when it completes";
     return false;
   }
-  if (!connectionManager.isAckedQueueIdle()) {
+  if (!synthHub.isAckedQueueIdle(slot)) {
     error = "A structural edit is still waiting for acknowledgement; retry when it completes";
     return false;
   }
@@ -1817,16 +2412,21 @@ bool MainComponent::replacePatchInSlot(int slot, std::unique_ptr<Patch> patch,
   // Detach them before replacing the owning unique_ptr.
   slotSynchronizers[slot].reset();
   if (slot == activeSlot) {
-    mainLayout->getInspector().clearModule();
+    // setPatch(nullptr), not clearModule(): see the note at the synth-fetch
+    // site above. clearSnapshots() below walks the morph UI while this patch is
+    // already gone, and it is the assignments list's cached pointer that it
+    // reads. Re-pointed at the end of this function.
+    mainLayout->getInspector().setPatch(nullptr);
     if (knobFloaterWindow)
       knobFloaterWindow->setPatch(nullptr);
     if (patchNotesFloaterWindow)
       patchNotesFloaterWindow->setPatch(nullptr);
   }
   slotPatches[slot] = std::move(patch);
+  ++slotPatchGeneration[slot];
   slotPatchFiles[slot] = sourceFile;
   // Whatever bank location this slot held belongs to the patch just replaced.
-  connectionManager.clearSlotBankLocation(slot);
+  synthHub.clearSlotBankLocation(slot);
   slotBankCandidates[slot].clear();
   slotPatchFromSynth[slot] = false;
 
@@ -1870,12 +2470,11 @@ bool MainComponent::replacePatchInSlot(int slot, std::unique_ptr<Patch> patch,
   }
 
   slotUndoManagers[slot].clearUndoHistory();
-  if (connectionManager.isConnected()) {
+  if (synthHub.isConnectedSlot(slot)) {
     // Upload messages carry their destination slot in the SysEx envelope, so
     // changing hardware focus first is unnecessary and introduces competing ACKs.
-    connectionManager.uploadPatch(slot, *slotPatches[slot]);
-    slotSynchronizers[slot] = std::make_unique<PatchSynchronizer>(
-        *slotPatches[slot], connectionManager, slot);
+    synthHub.uploadPatch(slot, *slotPatches[slot]);
+    slotSynchronizers[slot] = std::make_unique<PatchSynchronizer>(*slotPatches[slot], synthHub.forSlot(slot), SynthHub::local(slot));
   }
   rebuildUndoContext(slot);
 
@@ -1896,7 +2495,7 @@ bool MainComponent::replacePatchInSlot(int slot, std::unique_ptr<Patch> patch,
 
   mainLayout->getSlotBar().setSlotName(slot, slotPatches[slot]->getName());
   // Synced when we just uploaded it; otherwise it lives in the editor only.
-  setSlotLocal(slot, !connectionManager.isConnected());
+  setSlotLocal(slot, !synthHub.isConnectedSlot(slot));
   mainLayout->getStatusBar().showMessage(
       (sourceFile.existsAsFile() ? "Loaded: " + sourceFile.getFileName()
                                  : "New patch: " + slotPatches[slot]->getName()),
@@ -1944,7 +2543,9 @@ void MainComponent::newPatch() {
 
   // CRITICAL: Destroy synchronizer BEFORE replacing patch
   currentSynchronizer().reset();
-  mainLayout->getInspector().clearModule();
+  // setPatch(nullptr) and not clearModule(): clearModule leaves the assignments
+  // list holding the patch replaced below.
+  mainLayout->getInspector().setPatch(nullptr);
   if (knobFloaterWindow)
     knobFloaterWindow->setPatch(nullptr);
   if (patchNotesFloaterWindow)
@@ -1955,6 +2556,7 @@ void MainComponent::newPatch() {
   flushExtras(activeSlot);
 
   currentPatch() = std::make_unique<Patch>();
+  ++slotPatchGeneration[activeSlot];
   currentPatch()->extrasId = PatchExtrasStore::newId();
   currentPatchFile() = juce::File();
   clearSnapshots(activeSlot);
@@ -1967,16 +2569,16 @@ void MainComponent::newPatch() {
     knobFloaterWindow->setPatch(currentPatch().get());
   if (patchNotesFloaterWindow)
     patchNotesFloaterWindow->setPatch(currentPatch().get());
-  connectionManager.clearSlotBankLocation(activeSlot);
+  synthHub.clearSlotBankLocation(activeSlot);
   updateStoreLocationDisplay();
   mainLayout->getSlotBar().setSlotName(activeSlot, currentPatch()->getName());
   mainLayout->getStatusBar().setConnectionStatus("New Patch", false);
   updateDspLoadDisplay();
 
-  if (connectionManager.isConnected()) {
+  if (synthHub.isConnectedSlot(activeSlot)) {
     // Upload empty patch to synth so it resets too
-    connectionManager.uploadPatch(activeSlot, *currentPatch());
-    currentSynchronizer() = std::make_unique<PatchSynchronizer>(*currentPatch(), connectionManager, activeSlot);
+    synthHub.uploadPatch(activeSlot, *currentPatch());
+    currentSynchronizer() = std::make_unique<PatchSynchronizer>(*currentPatch(), synthHub.forSlot(activeSlot), SynthHub::local(activeSlot));
   }
 
   undoManager().clearUndoHistory();
@@ -2073,7 +2675,7 @@ void MainComponent::loadPatchFromFile(const juce::File &file, int targetSlot, bo
   if (targetSlot >= 0 && targetSlot < numSlots && targetSlot != activeSlot)
     switchToSlot(targetSlot);
 
-  std::cout << "===== LOAD PATCH: slot=" << static_cast<char>('A' + activeSlot)
+  std::cout << "===== LOAD PATCH: slot=" << SynthSlot::label(activeSlot)
             << (localOnly ? " (LOCAL)" : "")
             << " source=file \"" << file.getFileName() << "\" =====" << std::endl;
 
@@ -2081,14 +2683,17 @@ void MainComponent::loadPatchFromFile(const juce::File &file, int targetSlot, bo
 
   // CRITICAL: Destroy synchronizer BEFORE replacing patch
   currentSynchronizer().reset();
-  // Clear inspector before replacing patch — its currentModule points into the old patch
-  mainLayout->getInspector().clearModule();
+  // Clear inspector before replacing patch — it points into the old patch, and
+  // setPatch(nullptr) is what drops the assignments list's copy of that pointer
+  // as well; clearModule() re-arms the list with it instead.
+  mainLayout->getInspector().setPatch(nullptr);
   if (knobFloaterWindow)
     knobFloaterWindow->setPatch(nullptr);
   if (patchNotesFloaterWindow)
     patchNotesFloaterWindow->setPatch(nullptr);
 
   currentPatch() = std::move(patch);
+  ++slotPatchGeneration[activeSlot];
   currentPatchFile() = file;
   clearSnapshots(activeSlot);
 
@@ -2116,7 +2721,7 @@ void MainComponent::loadPatchFromFile(const juce::File &file, int targetSlot, bo
   // Local load (issue #21): keep the patch in the editor only — no upload, no
   // synchronizer that would push edits onto a synth slot holding a different
   // patch. Mark the slot LOCAL so the divergence from the synth is visible.
-  if (!localOnly && connectionManager.isConnected()) {
+  if (!localOnly && synthHub.isConnectedSlot(activeSlot)) {
     // Send loaded patch to synth so it plays immediately. Must be activeSlot
     // (the tab that just received this file), not getCurrentSlot() (whatever
     // slot happens to have hardware focus) — those can differ since slot
@@ -2125,38 +2730,48 @@ void MainComponent::loadPatchFromFile(const juce::File &file, int targetSlot, bo
     // the synchronizer below stayed correctly bound to activeSlot (found in
     // code review).
     int slot = activeSlot;
-    connectionManager.selectSlot(slot);
+    synthHub.selectSlot(slot);
     std::cout << "[FILE] Focusing synth slot " << slot << " before disk patch upload" << std::endl;
     mainLayout->getStatusBar().showMessage(
         "Uploading " + file.getFileName() + " to synth...", 0);
 
     juce::Component::SafePointer<MainComponent> safeThis(this);
-    connectionManager.setUploadCompleteCallback([safeThis, slot, fileName = file.getFileName()]() {
+    synthHub.setUploadCompleteCallback(slot, [safeThis, slot, fileName = file.getFileName()]() {
       if (!safeThis)
         return;
 
-      safeThis->connectionManager.setUploadCompleteCallback(nullptr);
+      safeThis->synthHub.setUploadCompleteCallback(slot, nullptr);
 
-      const char* slotNames[] = {"A", "B", "C", "D"};
-      juce::String slotName = (slot >= 0 && slot < 4) ? slotNames[slot] : juce::String(slot);
+      juce::String slotName = SynthSlot::valid(slot) ? SynthSlot::label(slot) : juce::String(slot);
       safeThis->mainLayout->getStatusBar().showMessage(
           "Uploaded " + fileName + " to synth slot " + slotName, 3000);
     });
 
-    juce::Timer::callAfterDelay(200, [safeThis, slot]() {
-      if (!safeThis || !safeThis->connectionManager.isConnected() || !safeThis->currentPatch())
+    // Address the destination slot's own patch, never currentPatch(): that
+    // follows the focused tab, and 200 ms is long enough to switch tabs. Doing
+    // so uploaded whatever you had just switched to into the slot this file was
+    // meant for. The generation check drops the upload entirely if the slot's
+    // patch was replaced again in the meantime (a second load, or New Patch).
+    const int loadGeneration = slotPatchGeneration[slot];
+    juce::Timer::callAfterDelay(200, [safeThis, slot, loadGeneration]() {
+      if (!safeThis || !safeThis->synthHub.isConnectedSlot(slot))
         return;
+      if (!safeThis->slotPatches[slot]
+          || safeThis->slotPatchGeneration[slot] != loadGeneration) {
+        std::cout << "[FILE] Delayed upload to slot " << slot
+                  << " dropped: that slot holds a different patch now" << std::endl;
+        return;
+      }
 
-      safeThis->connectionManager.uploadPatch(slot, *safeThis->currentPatch());
+      safeThis->synthHub.uploadPatch(slot, *safeThis->slotPatches[slot]);
       std::cout << "[FILE] Uploading loaded patch to synth slot " << slot << std::endl;
     });
 
-    currentSynchronizer() = std::make_unique<PatchSynchronizer>(
-        *currentPatch(), connectionManager, activeSlot);
+    currentSynchronizer() = std::make_unique<PatchSynchronizer>(*currentPatch(), synthHub.forSlot(activeSlot), SynthHub::local(activeSlot));
     std::cout << "[SYNC] Patch synchronizer enabled after file load" << std::endl;
   }
 
-  setSlotLocal(activeSlot, localOnly || !connectionManager.isConnected());
+  setSlotLocal(activeSlot, localOnly || !synthHub.isConnectedSlot(activeSlot));
 
   undoManager().clearUndoHistory();
   rebuildUndoContext(activeSlot);
@@ -2172,19 +2787,25 @@ void MainComponent::openPatchFileWithChooser(const juce::File &file) {
     return;
   }
 
+  // The four slots of the synth on screen. The dialog speaks 0-3 and the
+  // editor's slots are global (synth * 4 + slot): filling it with all of them
+  // wrote past the array and closed the editor on every open.
+  const int synth = SynthSlot::synthOf(activeSlot);
   std::array<juce::String, 4> names;
-  for (int i = 0; i < numSlots; ++i)
+  for (int i = 0; i < kSlotsPerSynth; ++i) {
+    const int slot = SynthSlot::global(synth, i);
     names[static_cast<size_t>(i)] =
-        slotPatches[i] ? slotPatches[i]->getName() : juce::String();
+        slotPatches[slot] ? slotPatches[slot]->getName() : juce::String();
+  }
 
   juce::Component::SafePointer<MainComponent> safeThis(this);
   SlotSelectDialog::show(
       this, "Open \"" + file.getFileNameWithoutExtension() + "\" into...",
-      names, activeSlot,
-      [safeThis, file](const SlotSelectDialog::Result &r) {
+      names, synth, SynthSlot::localOf(activeSlot),
+      [safeThis, file, synth](const SlotSelectDialog::Result &r) {
         if (!safeThis || !r.confirmed)
           return;
-        safeThis->loadPatchFromFile(file, r.slot, r.local);
+        safeThis->loadPatchFromFile(file, SynthSlot::global(synth, r.slot), r.local);
       });
 }
 
@@ -2204,6 +2825,15 @@ void MainComponent::loadBankPatchIntoSlot(int section, int position, int slot) {
   if (slot < 0 || slot >= numSlots)
     return;
 
+  // The bank positions on screen are the active synth's. Loading them into a slot
+  // of another synth would fetch whatever that synth keeps at the same position.
+  if (SynthSlot::synthOf(slot) != synthHub.activeSynth()) {
+    mainLayout->getStatusBar().showMessage(
+        "The browser lists the bank of synth " + juce::String(synthHub.activeSynth() + 1)
+            + ": switch to synth " + juce::String(SynthSlot::synthOf(slot) + 1) + " to load from its bank", 4000);
+    return;
+  }
+
   pendingBrowserLoadSlot = slot;
 
   // Show the destination, so the patch does not arrive somewhere off screen.
@@ -2214,16 +2844,16 @@ void MainComponent::loadBankPatchIntoSlot(int section, int position, int slot) {
 
   std::cout << "[MAIN] Loading patch from browser: section=" << section
             << " pos=" << position
-            << " targetSlot=" << juce::String::charToString(static_cast<char>('A' + slot))
+            << " targetSlot=" << SynthSlot::label(slot)
             << std::endl;
 
-  connectionManager.loadPatchFromBank(section, position, slot);
+  synthHub.loadPatchFromBank(section, position, slot);
   updateStoreLocationDisplay();
   mainLayout->getPatchBrowser().setLoadedPatch(section, position);
 }
 
 void MainComponent::storePatchToBank() {
-  if (!connectionManager.isConnected()) {
+  if (!synthHub.active().isConnected()) {
     juce::AlertWindow::showMessageBoxAsync(
         juce::MessageBoxIconType::WarningIcon,
         "Not Connected",
@@ -2237,7 +2867,7 @@ void MainComponent::storePatchToBank() {
         "Please load a patch first.");
     return;
   }
-  if (!connectionManager.isPatchListLoaded()) {
+  if (!synthHub.active().isPatchListLoaded()) {
     juce::AlertWindow::showMessageBoxAsync(
         juce::MessageBoxIconType::WarningIcon,
         "Patch List Not Loaded",
@@ -2250,8 +2880,8 @@ void MainComponent::storePatchToBank() {
 
   // Open on the patch's own location, so storing it back where it came from is
   // just OK instead of hunting through nine banks of 99 every time.
-  int initialSection = connectionManager.getSlotBankSection(slot);
-  int initialPosition = connectionManager.getSlotBankPosition(slot);
+  int initialSection = synthHub.getSlotBankSection(slot);
+  int initialPosition = synthHub.getSlotBankPosition(slot);
   // No certain location, but positions with this patch's name: open on the
   // first of them, which beats bank 1 position 1 by a mile.
   if (initialSection < 0 && !slotBankCandidates[slot].empty()) {
@@ -2259,21 +2889,26 @@ void MainComponent::storePatchToBank() {
     initialPosition = slotBankCandidates[slot].front().second;
   }
 
+  // The dialog speaks of the synth's own four slots (A-D); the slot it hands back is one
+  // of those, and belongs to the synth the store was opened on. Taken as a global slot it
+  // reached the first synth, whichever one the user was working on.
+  const int synth = SynthSlot::synthOf(slot);
   PatchLocationDialog::show(this, "Store Patch to Bank",
-    connectionManager.getPatchList(), true, slot,
-    [safeThis](const PatchLocationDialog::Result& result) {
+    synthHub.active().getPatchList(), true, SynthSlot::localOf(slot),
+    [safeThis, synth](const PatchLocationDialog::Result& result) {
       if (safeThis == nullptr || !result.confirmed) return;
-      safeThis->sendStoreToBank(result.slot, result.section, result.position);
+      safeThis->storeAndReport(SynthSlot::global(synth, result.slot), result.section,
+                               result.position);
     },
     initialSection, initialPosition);
 }
 
 void MainComponent::quickStoreToBank() {
-  if (!connectionManager.isConnected() || currentPatch() == nullptr)
+  if (!synthHub.active().isConnected() || currentPatch() == nullptr)
     return;
 
-  const int section = connectionManager.getSlotBankSection(activeSlot);
-  const int position = connectionManager.getSlotBankPosition(activeSlot);
+  const int section = synthHub.getSlotBankSection(activeSlot);
+  const int position = synthHub.getSlotBankPosition(activeSlot);
 
   // Nothing certain to overwrite: a new patch, one opened from a file, or one
   // the synth loaded from its front panel without saying from where. Ask.
@@ -2291,7 +2926,17 @@ void MainComponent::quickStoreToBank() {
     return;
   }
 
-  sendStoreToBank(activeSlot, section, position);
+  storeAndReport(activeSlot, section, position);
+}
+
+// The editor's slot is not always what the synth's working slot holds (a new patch, one
+// opened from a file), and a Store writes the working slot. So the patch goes up first,
+// as the MCP store does, and the Store follows once the synth has taken it.
+void MainComponent::storeAndReport(int slot, int section, int position) {
+  juce::String error;
+  if (!storeSlotPatchToBank(slot, section, position, error))
+    juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                           "Store failed", error);
 }
 
 void MainComponent::sendStoreToBank(int slot, int section, int position) {
@@ -2299,23 +2944,55 @@ void MainComponent::sendStoreToBank(int slot, int section, int position) {
     return;
 
   const int location = (section + 1) * 100 + position + 1;
-  StorePatchMessage msg(slot, section, position);
-  connectionManager.sendRawSysEx(msg.toSysEx(slot));
+  juce::Component::SafePointer<MainComponent> safeThis(this);
+  const auto name = slotPatches[slot] != nullptr ? slotPatches[slot]->getName().toStdString()
+                                                  : std::string();
 
-  // The patch now lives here, which is what the next store offers by default,
-  // and the shortlist of same-named positions stops mattering.
-  connectionManager.setSlotBankLocation(slot, section, position);
-  slotBankCandidates[slot].clear();
-  if (slot == activeSlot)
-    updateStoreLocationDisplay();
-  mainLayout->getPatchBrowser().setLoadedPatch(section, position);
+  // The synth answers a Store with the position and name it now holds there; only that
+  // answer says the patch is in flash (the original editor waits for it too). It is asked
+  // for before the Store goes out, so a quick answer is not missed.
+  synthHub.forSlot(slot).expectStoreConfirmation(section, position,
+      [safeThis, slot, section, position, location, name](bool confirmed) {
+        if (safeThis == nullptr) return;
+        auto* self = safeThis.getComponent();
+        if (confirmed) {
+          // The patch lives here now, which is what the next store offers by default,
+          // and the shortlist of same-named positions stops mattering.
+          self->synthHub.setSlotBankLocation(slot, section, position);
+          self->slotBankCandidates[slot].clear();
+          self->synthHub.forSlot(slot).setPatchListName(section, position, name);
+          if (slot == self->activeSlot)
+            self->updateStoreLocationDisplay();
+          if (SynthSlot::synthOf(slot) == self->synthHub.activeSynth()) {
+            self->mainLayout->getPatchBrowser().setPatchList(self->synthHub.active().getPatchList());
+            self->mainLayout->getPatchBrowser().setLoadedPatch(section, position);
+          }
+          self->mainLayout->getStatusBar().showMessage(
+              "Stored slot " + SynthSlot::label(slot) + " to bank location "
+              + juce::String(location) + " (the synth confirmed it)", 3000);
+        } else {
+          self->mainLayout->getStatusBar().showMessage(
+              "Bank location " + juce::String(location)
+              + " was NOT confirmed by the synth - reading the bank again", 8000);
+        }
+        std::cout << "[STORE] Slot " << SynthSlot::label(slot).toStdString()
+                  << " -> bank location " << location
+                  << (confirmed ? " confirmed" : " NOT confirmed") << std::endl;
 
-  const char* slotNames[] = {"A", "B", "C", "D"};
-  mainLayout->getStatusBar().showMessage(
-      "Stored slot " + juce::String(slotNames[slot])
-      + " to bank location " + juce::String(location), 3000);
-  std::cout << "[STORE] Slot " << slotNames[slot] << " -> bank location "
-            << location << std::endl;
+        // Whatever the answer, the list is read again from the synth: what it says is
+        // the truth, and the name written above is only what we expect to find.
+        juce::Timer::callAfterDelay(300, [safeThis, slot]() {
+          if (safeThis != nullptr && safeThis->synthHub.forSlot(slot).isConnected())
+            safeThis->synthHub.forSlot(slot).requestPatchList();
+        });
+      });
+
+  StorePatchMessage msg(SynthHub::local(slot), section, position);
+  // Through the ACK queue, like ConnectionManager::storeLoadedSlotToBank. Sent
+  // raw, a store fired straight off an upload's last ACK could reach a synth
+  // still busy with that upload and be dropped without a word: of four stores
+  // in a row on 2026-09-13, one never reached the bank.
+  synthHub.sendAckedSysEx(slot, msg.toSysEx(SynthHub::local(slot)));
 }
 
 void MainComponent::inferSlotBankLocation(int slot) {
@@ -2323,18 +3000,17 @@ void MainComponent::inferSlotBankLocation(int slot) {
     return;
   if (!slotPatchFromSynth[slot] || slotIsLocal[slot])
     return;
-  if (connectionManager.getSlotBankSection(slot) >= 0)
+  if (synthHub.getSlotBankSection(slot) >= 0)
     return;  // the synth already told us, and it is the better answer
 
   const auto name = slotPatches[slot]->getName();
-  const char* slotLetters[] = {"A", "B", "C", "D"};
-  auto matches = connectionManager.findPatchLocations(name);
+  auto matches = synthHub.forSlot(slot).findPatchLocations(name);
   slotBankCandidates[slot] = matches;
 
   if (matches.size() != 1) {
-    std::cout << "[STORE] Slot " << slotLetters[slot] << " patch \""
+    std::cout << "[STORE] Slot " << SynthSlot::label(slot).toStdString() << " patch \""
               << name.toStdString() << "\": "
-              << (connectionManager.isPatchListLoaded()
+              << (synthHub.forSlot(slot).isPatchListLoaded()
                       ? (matches.empty()
                              ? std::string("no bank position carries that name")
                              : "the name is in " + std::to_string(matches.size())
@@ -2346,9 +3022,9 @@ void MainComponent::inferSlotBankLocation(int slot) {
     return;
   }
 
-  connectionManager.setSlotBankLocation(slot, matches[0].first, matches[0].second);
+  synthHub.setSlotBankLocation(slot, matches[0].first, matches[0].second);
   slotBankCandidates[slot].clear();
-  std::cout << "[STORE] Slot " << slotLetters[slot] << " patch \""
+  std::cout << "[STORE] Slot " << SynthSlot::label(slot).toStdString() << " patch \""
             << name.toStdString() << "\" matched bank location "
             << ((matches[0].first + 1) * 100 + matches[0].second + 1) << std::endl;
   if (slot == activeSlot)
@@ -2357,23 +3033,23 @@ void MainComponent::inferSlotBankLocation(int slot) {
 
 void MainComponent::updateStoreLocationDisplay() {
   auto& headerBar = mainLayout->getHeaderBar();
-  headerBar.setStoreEnabled(connectionManager.isConnected());
-  headerBar.setCurrentLocation(connectionManager.getSlotBankSection(activeSlot),
-                               connectionManager.getSlotBankPosition(activeSlot));
+  headerBar.setStoreEnabled(synthHub.active().isConnected());
+  headerBar.setCurrentLocation(synthHub.getSlotBankSection(activeSlot),
+                               synthHub.getSlotBankPosition(activeSlot));
   headerBar.setStoreUncertain(!slotBankCandidates[activeSlot].empty());
 }
 
 bool MainComponent::storeSlotPatchToBank(int slot, int bankSection, int position,
                                          juce::String &error) {
-  if (!connectionManager.isConnected()) {
-    error = "Not connected to a Nord Modular";
-    return false;
-  }
   if (slot < 0 || slot >= numSlots || slotPatches[slot] == nullptr) {
     error = "No patch loaded in slot " + juce::String(slot);
     return false;
   }
-  if (!connectionManager.isPatchListLoaded()) {
+  if (!synthHub.isConnectedSlot(slot)) {
+    error = "Not connected to a Nord Modular";
+    return false;
+  }
+  if (!synthHub.forSlot(slot).isPatchListLoaded()) {
     error = "Patch list not loaded yet";
     return false;
   }
@@ -2385,13 +3061,13 @@ bool MainComponent::storeSlotPatchToBank(int slot, int bankSection, int position
   // Upload the editor patch to the synth slot first so the bank stores exactly
   // this patch, then send the store once the synth ACKs the upload.
   juce::Component::SafePointer<MainComponent> safeThis(this);
-  connectionManager.setUploadCompleteCallback(
+  synthHub.setUploadCompleteCallback(slot,
       [safeThis, slot, bankSection, position]() {
         if (!safeThis) return;
-        safeThis->connectionManager.setUploadCompleteCallback(nullptr);
+        safeThis->synthHub.setUploadCompleteCallback(slot, nullptr);
         safeThis->sendStoreToBank(slot, bankSection, position);
       });
-  connectionManager.uploadPatch(slot, *slotPatches[slot]);
+  synthHub.uploadPatch(slot, *slotPatches[slot]);
   return true;
 }
 
@@ -2416,14 +3092,27 @@ bool MainComponent::saveSlotPatchToFile(int slot, const juce::File &file) {
 }
 
 void MainComponent::showPatchSettingsDialog() {
+  if (patchSettingsDialog != nullptr) { patchSettingsDialog->dismiss(); return; }
   if (currentPatch() == nullptr)
     return;
 
-  announceDialogOnSynth(
+  // Bind the dialog to the patch it was opened on. Reading currentPatch() when
+  // it closes would apply the settings to whatever tab has focus by then, and
+  // uploading to getCurrentSlot() would send them to whichever slot the synth
+  // is looking at, which is not necessarily this one (same mismatch as the
+  // delayed upload in loadPatchFromFile).
+  const int slot = activeSlot;
+  const int settingsGeneration = slotPatchGeneration[slot];
+
+  auto* patchSettings =
       PatchSettingsDialog::show(this, currentPatch()->getHeader(),
-      [this](const PatchSettingsDialog::Result& r)
+      [this, slot, settingsGeneration](const PatchSettingsDialog::Result& r)
       {
-        auto& h = currentPatch()->getHeader();
+        if (slotPatches[slot] == nullptr
+            || slotPatchGeneration[slot] != settingsGeneration)
+          return;  // that patch is gone; the settings no longer belong anywhere
+
+        auto& h = slotPatches[slot]->getHeader();
         h.voices = r.voices;
         h.velRangeMin = r.velRangeMin;
         h.velRangeMax = r.velRangeMax;
@@ -2441,16 +3130,19 @@ void MainComponent::showPatchSettingsDialog() {
         mainLayout->getStatusBar().showMessage("Patch settings updated", 2000);
 
         // Upload full patch to synth if connected
-        if (connectionManager.isConnected())
-          connectionManager.uploadPatch(connectionManager.getCurrentSlot(), *currentPatch());
-      }));
+        if (synthHub.isConnectedSlot(slot))
+          synthHub.uploadPatch(slot, *slotPatches[slot]);
+      });
+  patchSettingsDialog = dynamic_cast<PatchSettingsDialog*>(patchSettings);
+  announceDialogOnSynth(patchSettings);
 }
 
 void MainComponent::showSynthSettingsDialog() {
-  if (connectionManager.isConnected())
+  if (synthSettingsDialog != nullptr) { synthSettingsDialog->dismiss(); return; }
+  if (synthHub.active().isConnected())
   {
     pendingSynthSettingsDialogOpen = true;
-    connectionManager.requestSynthSettings();
+    synthHub.active().requestSynthSettings();
     mainLayout->getStatusBar().showMessage("Requesting synth settings...", 1200);
 
     juce::Component::SafePointer<MainComponent> safeThis(this);
@@ -2468,29 +3160,70 @@ void MainComponent::showSynthSettingsDialog() {
 }
 
 void MainComponent::openSynthSettingsDialog() {
-  synthSettingsDialog = SynthSettingsDialog::show(this, cachedSynthSettings,
-      [this](const SynthSettings& s)
+  // Bound to the synth it was opened on, whichever one is being edited when it closes.
+  const int synth = synthHub.activeSynth();
+  synthSettingsDialog = SynthSettingsDialog::show(this, activeState().settings,
+      [this, synth](const SynthSettings& s)
       {
-        cachedSynthSettings = s;
-        mainLayout->getHeaderBar().setSynthName(juce::String(s.name));
+        synthState[static_cast<size_t>(synth)].settings = s;
+        if (synth == synthHub.activeSynth())
+          mainLayout->getHeaderBar().setSynthName(juce::String(s.name));
+        setSynthDisplayName(synth, juce::String(s.name));
         mainLayout->getStatusBar().showMessage("Synth settings updated", 2000);
-        if (connectionManager.isConnected())
-          connectionManager.sendSynthSettings(s);
+        if (synthHub.synth(synth).isConnected())
+          synthHub.synth(synth).sendSynthSettings(s);
       });
   announceDialogOnSynth(synthSettingsDialog);
 }
 
 void MainComponent::showMidiSettingsDialog() {
-  announceDialogOnSynth(
-      MidiSettingsDialog::show(
-          this, lastInputId, lastOutputId, connectionManager.getStatus(),
-          [this](const juce::String &inputId, const juce::String &outputId) {
-            handleConnectionRequest(inputId, outputId);
-          },
-          [this]() { handleDisconnectionRequest(); }));
+  // Open already: the button (or Ctrl+M) closes it instead of opening a second one
+  if (midiSettingsDialog != nullptr) { midiSettingsDialog->dismiss(); return; }
+  MidiSettingsDialog::Ports ports;
+  auto* settings = appProperties.getUserSettings();
+  for (int i = 0; i < kMaxSynths; ++i) {
+    const auto& st = synthState[static_cast<size_t>(i)];
+    auto& p = ports[static_cast<size_t>(i)];
+    p.inputId = st.lastInputId;
+    p.outputId = st.lastOutputId;
+    // Enabled is what the user last asked for; a connected port is certainly enabled.
+    p.enabled = synthHub.synth(i).isConnected()
+             || (settings != nullptr && settings->getBoolValue(portKey("midiEnabled", i), i == 0));
+  }
+  midiSettingsDialog = MidiSettingsDialog::show(
+      this, ports,
+      [this](int port, const MidiSettingsDialog::Port& wanted) {
+        if (auto* st = appProperties.getUserSettings()) {
+          const auto& had = synthState[static_cast<size_t>(port)];
+          const bool wasEnabled = synthHub.synth(port).isConnected()
+                               || st->getBoolValue(portKey("midiEnabled", port), port == 0);
+          const bool userChange = wanted.enabled != wasEnabled
+                               || wanted.inputId != had.lastInputId || wanted.outputId != had.lastOutputId;
+          st->setValue(portKey("midiEnabled", port), wanted.enabled);
+          // What is changed here by hand is the user's: not switched on or off by the editor
+          // again. Apply on a port nobody touched (it only retries an enabled port) leaves a
+          // port the editor runs for an emulator as it is.
+          if (userChange) {
+            st->setValue(portKey("midiAutoOff", port), false);
+            st->setValue(portKey("midiAutoPort", port), false);
+          }
+          st->saveIfNeeded();
+        }
+        if (!wanted.enabled) {
+          if (synthHub.synth(port).isConnected())
+            handleDisconnectionRequest(port);
+        } else if (wanted.inputId.isNotEmpty() && wanted.outputId.isNotEmpty()) {
+          handleConnectionRequest(port, wanted.inputId, wanted.outputId);
+        }
+      });
+  // Each port shows what its connection says right now.
+  for (int i = 0; i < kMaxSynths; ++i)
+    midiSettingsDialog->setPortStatus(i, synthHub.synth(i).getStatus());
+  announceDialogOnSynth(midiSettingsDialog.getComponent());
 }
 
 void MainComponent::showEditorOptionsDialog() {
+  if (editorOptionsDialog != nullptr) { editorOptionsDialog->dismiss(); return; }
 #if NME_MCP_BRIDGE
   McpBridgeStatusKind mcpStatus = McpBridgeStatusKind::Disabled;
   juce::String mcpStatusText = "Disabled";
@@ -2521,27 +3254,44 @@ void MainComponent::showEditorOptionsDialog() {
     if (auto* topComp = juce::Desktop::getInstance().getComponent(0))
       topComp->repaint();
   };
+  editorOptionsDialog = dialog;
   announceDialogOnSynth(dialog);
 }
 
 void MainComponent::applyEditorOptions(const EditorOptions& opts) {
+  const auto before = editorOptions;
   editorOptions = opts;
+  // What the background checks write is not the dialog's: its copy is from when it opened.
+  editorOptions.communityThemesChecked = before.communityThemesChecked;
+  editorOptions.communityThemesSeen    = before.communityThemesSeen;
+  editorOptions.newVersionChecked      = before.newVersionChecked;
+  editorOptions.latestVersion          = before.latestVersion;
+  editorOptions.newVersionSeen         = before.newVersionSeen;
+  // A theme picked in the dialog brings its render style, unless the dialog's own
+  // render options were changed too: then those are what the user asked for.
+  if (opts.uiThemeIndex != before.uiThemeIndex && opts.renderStyle() == before.renderStyle())
+    editorOptions.setRenderStyle(ThemeRegistry::switchRender(
+        before.renderStyle(), editorOptions.renderBeforeTheme, ThemeRegistry::get(opts.uiThemeIndex).render));
   auto libraryOk = editorOptions.ensureLibraryFolders();
   editorOptions.save(appProperties.getUserSettings());
   // Pointing the library somewhere else moves where presets are read and written.
   modulePresets.setFolder(presetsFolder());
   refreshInspectorPresets();
+  applyInterfaceScale(opts.uiScale);
   PatchCanvas::setCableStyle   (static_cast<int>(opts.cableStyle));
   KnobDrag::setMode           (static_cast<int>(opts.knobControl));
   PatchCanvas::setAutoUpload   (opts.autoUpload);
   PatchCanvas::setCableOpacity (opts.cableOpacity);
+  // Every surface that draws a value reads this, so switching it has to redraw
+  // the canvases and the inspector; applyUiTheme below does both.
+  ValueFormatters::setPreferNoteNames (opts.seqNoteNames);
   mainLayout->getPatchArea().setAnimated(opts.animateTiling);
   applyUiTheme(editorOptions.uiThemeIndex, false);
 
   // Synth parameter send speed (Mutator/Random throughput)
   const auto& rates = EditorOptions::sendRates();
   const int ri = juce::jlimit(0, static_cast<int>(rates.size()) - 1, opts.sendRateIndex);
-  connectionManager.setParamSendRate(rates[static_cast<size_t>(ri)].batch,
+  synthHub.active().setParamSendRate(rates[static_cast<size_t>(ri)].batch,
                                      rates[static_cast<size_t>(ri)].intervalMs);
 
   if (editorOptions.presetLibraryRoot != juce::File()) {
@@ -2590,17 +3340,639 @@ void MainComponent::applyUiTheme(int index, bool persist) {
   const int n = ThemeRegistry::count();
   index = ((index % n) + n) % n;
   editorOptions.uiThemeIndex = index;
+  applyThemeLive(ThemeRegistry::get(index));
+  if (persist)
+    editorOptions.save(appProperties.getUserSettings());
+}
 
-  const auto& theme = ThemeRegistry::get(index);
+void MainComponent::snapshotMenus(const juce::File& dir, int index)
+{
+  const auto names = getMenuBarNames();
+  dir.createDirectory();
+  auto shootWindow = [dir](juce::Component& c, const juce::String& name) {
+    const auto img = c.createComponentSnapshot(c.getLocalBounds(), true, juce::jmax(1.0f, juce::SystemStats::getEnvironmentVariable("NME_SNAPSHOT_SCALE", "1").getFloatValue()));
+    juce::FileOutputStream out(dir.getChildFile(name + ".png"));
+    if (out.openedOk())
+    {
+      out.setPosition(0);
+      out.truncate();
+      juce::PNGImageFormat().writeImageToStream(img, out);
+    }
+  };
+
+  if (index == 0)
+  {
+    // A clean start shows the Beta warning: picture it, then take it away so it is not in the menus' way
+    auto& desktop = juce::Desktop::getInstance();
+    for (int i = desktop.getNumComponents(); --i >= 0;)
+      if (auto* c = desktop.getComponent(i); c != nullptr && c->getName() == "beta-warning")
+      {
+        shootWindow(*c, "dialog-beta");
+        c->removeFromDesktop();
+        delete c;
+      }
+  }
+
+  if (index == names.size())
+  {
+    // The Keyboard Shortcuts window, then on to the rest
+    showKeyboardShortcutsDialog();
+    juce::Component::SafePointer<MainComponent> safeThis(this);
+    juce::Timer::callAfterDelay(1000, [safeThis, dir, shootWindow]() mutable {
+      if (!safeThis) return;
+      auto& desktop = juce::Desktop::getInstance();
+      for (int i = 0; i < desktop.getNumComponents(); ++i)
+        if (auto* sd = dynamic_cast<ShortcutsDialog*>(desktop.getComponent(i)))
+        {
+          shootWindow(*sd, "dialog-shortcuts");
+          sd->showGroupForSnapshot(2);
+          shootWindow(*sd, "dialog-shortcuts-canvas");
+          sd->setFilterForSnapshot("zoom");
+          shootWindow(*sd, "dialog-shortcuts-filter");
+          sd->dismiss();
+          break;
+        }
+      juce::Timer::callAfterDelay(250, [safeThis, dir]() { if (safeThis) safeThis->saveSnapshotsAndQuit(dir); });
+    });
+    return;
+  }
+  if (index > names.size()) { saveSnapshotsAndQuit(dir); return; }
+
+  // Open the menu as the bar would, give it a moment to appear, picture the window it opens (the only
+  // top-level one besides the editor's own), close it and go on to the next
+  getMenuForIndex(index, names[index]).showMenuAsync(juce::PopupMenu::Options());
+  juce::Component::SafePointer<MainComponent> safeThis(this);
+  juce::Timer::callAfterDelay(500, [safeThis, dir, index, names]() {
+    if (!safeThis) return;
+    auto* mine = safeThis->getTopLevelComponent();
+    auto& desktop = juce::Desktop::getInstance();
+    for (int i = 0; i < desktop.getNumComponents(); ++i)
+      if (auto* c = desktop.getComponent(i); c != nullptr && c != mine && c->isVisible() && c->getWidth() > 40
+                                             && c->getName() != "beta-warning")
+      {
+        const auto img = c->createComponentSnapshot(c->getLocalBounds(), true, juce::jmax(1.0f, juce::SystemStats::getEnvironmentVariable("NME_SNAPSHOT_SCALE", "1").getFloatValue()));
+        juce::FileOutputStream out(dir.getChildFile("menu-" + juce::String(index) + "-" + names[index].retainCharacters("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") + ".png"));
+        if (out.openedOk())
+        {
+          out.setPosition(0);
+          out.truncate();
+          juce::PNGImageFormat().writeImageToStream(img, out);
+        }
+        break;
+      }
+    juce::PopupMenu::dismissAllActiveMenus();
+    juce::Timer::callAfterDelay(250, [safeThis, dir, index]() { if (safeThis) safeThis->snapshotMenus(dir, index + 1); });
+  });
+}
+
+void MainComponent::saveSnapshotsAndQuit(const juce::File& dir)
+{
+  dir.createDirectory();
+  auto save = [dir](juce::Component& c, juce::Rectangle<int> area, const juce::String& name, float scale) {
+    if (area.isEmpty()) return;
+    // NME_SNAPSHOT_SCALE=2 makes every picture twice as sharp (for screenshots)
+    const float extra = juce::jmax(1.0f, juce::SystemStats::getEnvironmentVariable("NME_SNAPSHOT_SCALE", "1").getFloatValue());
+    const auto img = c.createComponentSnapshot(area, true, scale * extra);
+    juce::FileOutputStream out(dir.getChildFile(name + ".png"));
+    if (out.openedOk())
+    {
+      out.setPosition(0);
+      out.truncate();
+      juce::PNGImageFormat().writeImageToStream(img, out);
+    }
+  };
+
+  mainLayout->getStatusBar().clearMessage();   // no "Loaded: ..." line in the picture
+  save(*this, getLocalBounds(), "main", 1.0f);
+  auto& header = mainLayout->getHeaderBar();
+  save(header, header.getLocalBounds(), "header", 3.0f);
+
+  // The floaters: open each, give it a moment to lay out, picture it, close it
+  toggleKnobFloater();
+  toggleKeyboardFloater();
+  togglePatchNotesFloater();
+  toggleMutatorWindow();
+  toggleSysexMonitor();
+  juce::Component::SafePointer<MainComponent> safeThis(this);
+  juce::Timer::callAfterDelay(800, [safeThis, dir, save]() mutable {
+    if (!safeThis) return;
+    if (safeThis->knobFloaterWindow)     save(*safeThis->knobFloaterWindow,     safeThis->knobFloaterWindow->getLocalBounds(),     "knob-floater", 1.0f);
+    if (safeThis->keyboardFloaterWindow) save(*safeThis->keyboardFloaterWindow, safeThis->keyboardFloaterWindow->getLocalBounds(), "keyboard-floater", 1.0f);
+    if (safeThis->patchNotesFloaterWindow) save(*safeThis->patchNotesFloaterWindow, safeThis->patchNotesFloaterWindow->getLocalBounds(), "notes-floater", 1.0f);
+    if (safeThis->mutatorWindow)         safeThis->mutatorWindow->getPanel().mutateForSnapshot();   // so the children are drawn
+    if (safeThis->mutatorWindow)         save(*safeThis->mutatorWindow,         safeThis->mutatorWindow->getLocalBounds(),         "mutator", 1.0f);
+    if (safeThis->sysexMonitorWindow)    save(*safeThis->sysexMonitorWindow,    safeThis->sysexMonitorWindow->getLocalBounds(),    "sysex-monitor", 1.0f);
+
+    // The Themes window as it opens in the editor, the Themes page and the Colours page
+    safeThis->showThemesDialog(ThemesDialog::Themes);
+    if (safeThis->themesDialog != nullptr)
+    {
+      save(*safeThis->themesDialog, safeThis->themesDialog->getLocalBounds(), "themes-real", 1.0f);
+      safeThis->themesDialog->showPage(ThemesDialog::Colours);
+      save(*safeThis->themesDialog, safeThis->themesDialog->getLocalBounds(), "themes-colours-real", 1.0f);
+      safeThis->themesDialog->dismiss();
+    }
+
+    // The dialogs: built off the desktop, pictured at their own size, dropped. (Bank Transfer needs a
+    // live synth link and is left out.)
+    auto shoot = [&save](juce::Component& c, const juce::String& name) { save(c, c.getLocalBounds(), name, 1.0f); };
+    {
+      AboutDialog d([](const juce::String&) {});
+      shoot(d, "dialog-about");
+    }
+    {
+      EditorOptionsDialog d(EditorOptions{}, McpBridgeStatusKind::Disabled, "MCP bridge is off", "");
+      for (int pg = 0; pg < EditorOptionsDialog::pageCount; ++pg)
+      {
+        d.showPageForSnapshot(pg);
+        shoot(d, "dialog-options-" + juce::String(pg));
+      }
+    }
+    {
+      MidiSettingsDialog d;
+      d.setPorts({});
+      shoot(d, "dialog-midi");
+    }
+    {
+      PatchSettingsDialog d(PatchHeader{}, [](const PatchSettingsDialog::Result&) {});
+      shoot(d, "dialog-patch-settings");
+    }
+    {
+      SynthSettingsDialog d(SynthSettings{}, [](const SynthSettings&) {});
+      shoot(d, "dialog-synth-settings");
+    }
+    {
+      std::vector<std::string> names(99 * 9);
+      names[0] = "Fractura";
+      PatchLocationDialog d("Store patch to...", names, true, 0, [](const PatchLocationDialog::Result&) {}, 0, 0);
+      shoot(d, "dialog-patch-location");
+    }
+    {
+      std::array<SaveSlotSetDialog::SlotInfo, 4> slots;
+      slots[0].patchName = "Fractura"; slots[0].hasPatch = true;
+      slots[3].patchName = "A Nucleo Duro"; slots[3].hasPatch = true;
+      SaveSlotSetDialog d("Directo", slots, [](const SaveSlotSetDialog::Result&) {});
+      shoot(d, "dialog-save-slot-set");
+    }
+    {
+      SlotSelectDialog d("Open \"Fractura\" into...", { "Fractura", "", "", "A Nucleo Duro" }, 0, 0,
+                         [](const SlotSelectDialog::Result&) {});
+      shoot(d, "dialog-slot-select");
+    }
+    {
+      // The module help window (F1): shown for a module that has help, taken away after the picture
+      if (auto* help = ModuleHelpPopup::show("2 Outputs|2 Outputs", safeThis.getComponent()))
+      {
+        shoot(*help, "popup-module-help");
+        help->removeFromDesktop();
+        delete help;
+      }
+    }
+    {
+      // Quick Add, with a search typed, and a tooltip drawn the way the editor draws them
+      auto* q = new QuickAddPopup(safeThis->moduleDescs, { 100, 100 }, 0, 0,
+                                  [](const ModuleDescriptor*, int, int) {}, [] {});
+      q->setSelectedForSnapshot(1);
+      shoot(*q, "popup-quick-add");
+      delete q;
+      juce::Image tip(juce::Image::ARGB, 260, 60, true);
+      juce::Graphics tg(tip);
+      safeThis->getLookAndFeel().drawTooltip(tg, "MIDI Setup (Ctrl+M)", 260, 60);
+      juce::PNGImageFormat png;
+      juce::FileOutputStream out(dir.getChildFile("tooltip.png"));
+      if (out.openedOk()) { out.setPosition(0); out.truncate(); png.writeImageToStream(tip, out); }
+    }
+    {
+      // The Themes window, a page at a time (the community page with a made-up list)
+      ThemesDialog d;
+      auto info = [](const char* n, juce::uint32 g, juce::uint32 p, juce::uint32 a, juce::uint32 t) {
+        return ThemesDialog::ThemeInfo { n, juce::Colour(g), juce::Colour(p), juce::Colour(a), juce::Colour(t) };
+      };
+      d.setThemes({ info("Nord", 0xff1b1f26, 0xff222730, 0xffe2b765, 0xffe4e8ee), info("Animatek Rack", 0xff16181c, 0xff1f2228, 0xffe5a53b, 0xffe8e8e8),
+                    info("Dracula", 0xff282a36, 0xff303341, 0xffbd93f9, 0xfff8f8f2), info("Nord Classic", 0xff2e3440, 0xff3b4252, 0xff88c0d0, 0xffeceff4) }, 1);
+      shoot(d, "window-themes-themes");
+      d.colours().setTheme(ThemeRegistry::get(0), "Nord");
+      d.showPage(ThemesDialog::Colours);
+      shoot(d, "window-themes-colours");
+      auto row = [](const char* name, const char* author, const char* desc, CommunityThemes::State st, bool isNew, bool inUse) {
+        CommunityThemesPanel::Row r;
+        r.entry.name = name; r.entry.author = author; r.entry.description = desc;
+        r.state = st; r.isNew = isNew; r.inUse = inUse;
+        return r;
+      };
+      d.community().setRows({ row("Animatek Rack", "animatek", "Flat knobs, dark", CommunityThemes::State::BuiltIn, false, true),
+                              row("Midnight", "someone", "Deep blues", CommunityThemes::State::NotInstalled, true, false),
+                              row("Paper", "someone else", "A light one", CommunityThemes::State::Changed, false, false) });
+      d.community().setStatus("Checked 2 minutes ago.");
+      d.setCommunityNewCount(1);
+      d.showPage(ThemesDialog::Community);
+      shoot(d, "window-themes-community");
+      d.showPage(ThemesDialog::Files);
+      shoot(d, "window-themes-files");
+    }
+    {
+      juce::AlertWindow d("Delete Patch", "Delete \"Fractura\" from location 101?", juce::MessageBoxIconType::WarningIcon);
+      d.addButton("Delete", 1, juce::KeyPress(juce::KeyPress::returnKey));
+      d.addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+      shoot(d, "dialog-alert");
+    }
+
+    juce::JUCEApplication::getInstance()->quit();
+  });
+}
+
+void MainComponent::cycleUiThemeFromKey()
+{
+  lastThemeKeyMs = juce::Time::getMillisecondCounter();
+  chooseUiTheme(editorOptions.uiThemeIndex + 1);
+  mainLayout->getStatusBar().showMessage(
+      "Theme: " + ThemeRegistry::get(editorOptions.uiThemeIndex).name, 2500);
+}
+
+void MainComponent::chooseUiTheme(int index) {
+  const int n = ThemeRegistry::count();
+  index = ((index % n) + n) % n;
+  editorOptions.setRenderStyle(ThemeRegistry::switchRender(
+      editorOptions.renderStyle(), editorOptions.renderBeforeTheme, ThemeRegistry::get(index).render));
+  applyUiTheme(index, true);
+  syncThemesDialog();
+}
+
+void MainComponent::importThemeFile() {
+  auto chooser = std::make_shared<juce::FileChooser>(
+      "Import Theme File", juce::File::getSpecialLocation(juce::File::userDocumentsDirectory), "*.json");
+  juce::Component::SafePointer<MainComponent> safeThis(this);
+  chooser->launchAsync(
+      juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+      [safeThis, chooser](const juce::FileChooser& fc) {
+        if (safeThis == nullptr) return;
+        const auto src = fc.getResult();
+        if (!src.existsAsFile()) return;
+
+        // Only data: a file far bigger than any theme is not one, and is not read.
+        juce::String error;
+        EditorTheme theme;
+        juce::var json;
+        if (src.getSize() > ThemeFile::kMaxFileBytes)
+          error = "too big for a theme file";
+        else if (const auto text = src.loadFileAsString();
+                 ThemeFile::fromJson(text, ThemeRegistry::get(1), theme, error))
+          json = juce::JSON::parse(text);
+        if (json.getDynamicObject() == nullptr) {
+          juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Import Theme File",
+              src.getFileName() + " is not a theme file: " + error + ".");
+          return;
+        }
+
+        // A built-in's name would come back as "<name> (user)"; say where it came from instead.
+        auto name = theme.name;
+        if (ThemeRegistry::findBuiltin(name) != nullptr) {
+          name += " (imported)";
+          json.getDynamicObject()->setProperty("name", name);
+        }
+        const auto folder = ThemeFile::userFolder();
+        folder.createDirectory();
+        const auto dst = folder.getChildFile(juce::File::createLegalFileName(name) + ".json");
+
+        auto install = [safeThis, dst, name, json] {
+          if (safeThis == nullptr) return;
+          auto& bar = safeThis->mainLayout->getStatusBar();
+          if (!dst.replaceWithText(juce::JSON::toString(json, false))) {
+            bar.showMessage("Could not write " + dst.getFullPathName(), 4000);
+            return;
+          }
+          ThemeRegistry::reloadUserThemes();
+          const int idx = ThemeRegistry::indexOfName(name);
+          if (idx >= 0)
+            safeThis->chooseUiTheme(idx);
+          bar.showMessage("Theme imported: " + name, 3000);
+        };
+
+        // The user's own theme of the same name is replaced only when they say so.
+        if (dst.existsAsFile()) {
+          juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Import Theme File",
+              "There is already a theme called \"" + name + "\" in your themes folder. Replace it?",
+              "Replace", "Cancel", nullptr,
+              juce::ModalCallbackFunction::create([install](int ok) { if (ok != 0) install(); }));
+          return;
+        }
+        install();
+      });
+}
+
+void MainComponent::exportCurrentTheme() {
+  const auto& cur = ThemeRegistry::get(editorOptions.uiThemeIndex);
+  // Missing keys fall back to a built-in: the theme itself, or Dark for a user theme.
+  const auto json = ThemeFile::toJson(cur, ThemeRegistry::findBuiltin(cur.name) != nullptr ? cur.name : "Dark");
+  auto chooser = std::make_shared<juce::FileChooser>(
+      "Export Current Theme",
+      juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+          .getChildFile(juce::File::createLegalFileName(cur.name) + ".json"),
+      "*.json");
+  juce::Component::SafePointer<MainComponent> safeThis(this);
+  chooser->launchAsync(
+      juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
+          | juce::FileBrowserComponent::warnAboutOverwriting,
+      [safeThis, chooser, json](const juce::FileChooser& fc) {
+        if (safeThis == nullptr) return;
+        auto file = fc.getResult();
+        if (file == juce::File()) return;
+        if (!file.hasFileExtension("json"))
+          file = file.withFileExtension("json");
+        safeThis->mainLayout->getStatusBar().showMessage(
+            file.replaceWithText(json) ? "Theme exported to " + file.getFullPathName()
+                                       : "Could not write " + file.getFullPathName(), 4000);
+      });
+}
+
+static juce::File communityIndexCacheFile() {
+  return ThemeFile::userFolder().getParentDirectory().getChildFile("community-themes.json");
+}
+
+void MainComponent::loadCommunityIndexCache() {
+  std::vector<CommunityThemes::Entry> list;
+  juce::String error;
+  if (CommunityThemes::parseIndex(communityIndexCacheFile().loadFileAsString(), list, error))
+    communityThemes = std::move(list);
+}
+
+// What the user has of a community theme; official ones are compared with the built-in.
+static CommunityThemes::State communityStateOf(const CommunityThemes::Entry& e) {
+  juce::String builtinSha;
+  if (e.official)
+    if (const auto* b = ThemeRegistry::findBuiltin(e.name)) {
+      const auto text = ThemeFile::officialJson(*b);
+      builtinSha = CommunityThemes::sha256Of(juce::MemoryBlock(text.toRawUTF8(), text.getNumBytesAsUTF8()));
+    }
+  return CommunityThemes::stateOf(e, ThemeFile::userFolder(), builtinSha);
+}
+
+int MainComponent::communityNewCount() const {
+  const auto seen = juce::StringArray::fromLines(editorOptions.communityThemesSeen);
+  int n = 0;
+  for (const auto& e : communityThemes)
+    if (CommunityThemes::isNew(e, communityStateOf(e), seen))
+      ++n;
+  return n;
+}
+
+void MainComponent::checkCommunityThemes(bool userAsked) {
+  if (communityBusy)
+    return;
+  communityBusy = true;
+  communityStatus = "Looking at github.com/animatek/nme-themes...";
+  refreshCommunityThemesWindow();
+  juce::Component::SafePointer<MainComponent> safeThis(this);
+  juce::Thread::launch([safeThis, userAsked] {
+    const auto data = CommunityThemes::fetch(juce::String(CommunityThemes::kRawBase) + "index.json",
+                                             CommunityThemes::kMaxIndexBytes);
+    juce::MessageManager::callAsync([safeThis, userAsked, data] {
+      if (safeThis == nullptr)
+        return;
+      auto& self = *safeThis;
+      self.communityBusy = false;
+      std::vector<CommunityThemes::Entry> list;
+      juce::String error = "no answer (offline?)";
+      if (data && CommunityThemes::parseIndex(data->toString(), list, error)) {
+        communityIndexCacheFile().replaceWithData(data->getData(), data->getSize());
+        self.communityThemes = std::move(list);
+        self.editorOptions.communityThemesChecked = juce::Time::currentTimeMillis();
+        self.editorOptions.save(self.appProperties.getUserSettings());
+        self.communityStatus = juce::String(static_cast<int>(self.communityThemes.size()))
+                               + " theme(s) in the repository, checked "
+                               + juce::Time::getCurrentTime().toString(false, true, false) + ".";
+        // On its own it only speaks up when there is something new.
+        if (const int fresh = self.communityNewCount(); fresh > 0 && !userAsked && self.themesDialog == nullptr)
+          self.mainLayout->getStatusBar().showMessage(
+              juce::String(fresh) + (fresh == 1 ? " new community theme" : " new community themes")
+                  + ": View > Themes... > Community", 8000);
+        self.menuItemsChanged();
+      } else {
+        self.communityStatus = "Could not read the list: " + error + ".";
+        if (!userAsked)
+          std::cout << "[THEMES] community check failed: " << error << std::endl;
+      }
+      self.refreshCommunityThemesWindow();
+    });
+  });
+}
+
+bool MainComponent::newVersionOut() const {
+  // Switched off in Editor Options, the last answer is not shown either.
+  return editorOptions.checkNewVersion
+      && VersionCheck::isNewer(editorOptions.latestVersion, JUCE_APPLICATION_VERSION_STRING);
+}
+
+bool MainComponent::newVersionUnseen() const {
+  return newVersionOut() && editorOptions.newVersionSeen != editorOptions.latestVersion;
+}
+
+void MainComponent::checkNewVersion() {
+  juce::Component::SafePointer<MainComponent> safeThis(this);
+  juce::Thread::launch([safeThis] {
+    const auto data = CommunityThemes::fetch(VersionCheck::kTagsUrl, VersionCheck::kMaxTagsBytes);
+    juce::MessageManager::callAsync([safeThis, data] {
+      if (safeThis == nullptr)
+        return;
+      auto& self = *safeThis;
+      // Offline, or GitHub said no (rate limit): quietly try again tomorrow's start.
+      const auto latest = data ? VersionCheck::latestRelease(data->toString()) : juce::String();
+      if (latest.isEmpty()) {
+        std::cout << "[VERSION] no answer from GitHub's tag list" << std::endl;
+        return;
+      }
+      const bool wasUnseen = self.newVersionUnseen();
+      self.editorOptions.latestVersion = latest;
+      self.editorOptions.newVersionChecked = juce::Time::currentTimeMillis();
+      self.editorOptions.save(self.appProperties.getUserSettings());
+      if (self.newVersionUnseen() && !wasUnseen && self.mainLayout != nullptr)
+        self.mainLayout->getStatusBar().showMessage(
+            "Animatek NME " + latest + " is out: About > Version " + latest + " to get it", 8000);
+      self.menuItemsChanged();
+    });
+  });
+}
+
+void MainComponent::showCommunityThemes() {
+  showThemesDialog(ThemesDialog::Community);
+}
+
+void MainComponent::syncThemesDialog() {
+  if (themesDialog == nullptr)
+    return;
+  std::vector<ThemesDialog::ThemeInfo> infos;
+  for (int i = 0; i < ThemeRegistry::count(); ++i) {
+    const auto& t = ThemeRegistry::get(i);
+    infos.push_back({ t.name, t.app.backgroundMain, t.app.backgroundPanel, t.app.accentActive, t.app.textPrimary });
+  }
+  themesDialog->setThemes(std::move(infos), editorOptions.uiThemeIndex);
+  themesDialog->setCommunityNewCount(communityNewCount());
+}
+
+void MainComponent::refreshCommunityThemesWindow() {
+  if (themesDialog == nullptr)
+    return;
+  // Everything listed counts as seen once the Community page shows it.
+  if (themesDialog->getPage() == ThemesDialog::Community) {
+    auto seen = juce::StringArray::fromLines(editorOptions.communityThemesSeen);
+    for (const auto& e : communityThemes)
+      seen.addIfNotAlreadyThere(CommunityThemes::seenKey(e));
+    seen.removeEmptyStrings();
+    if (seen.joinIntoString("\n") != editorOptions.communityThemesSeen) {
+      editorOptions.communityThemesSeen = seen.joinIntoString("\n");
+      editorOptions.save(appProperties.getUserSettings());
+      menuItemsChanged();
+    }
+  }
+  const auto current = ThemeRegistry::get(editorOptions.uiThemeIndex).name;
+  std::vector<CommunityThemesPanel::Row> rows;
+  for (const auto& e : communityThemes) {
+    CommunityThemesPanel::Row r;
+    r.entry = e;
+    r.state = communityStateOf(e);
+    r.isNew = CommunityThemes::isNew(e, r.state, communitySeenWhenOpened);
+    r.inUse = (r.state == CommunityThemes::State::Installed || r.state == CommunityThemes::State::BuiltIn)
+              && (current == e.name || current == e.name + " (user)");
+    rows.push_back(r);
+  }
+  auto& panel = themesDialog->community();
+  panel.setRows(std::move(rows));
+  panel.setStatus(communityStatus);
+  panel.setBusy(communityBusy);
+  syncThemesDialog();
+}
+
+void MainComponent::installCommunityTheme(const CommunityThemes::Entry& entry) {
+  auto pick = [this](const juce::String& name) {
+    int idx = ThemeRegistry::indexOfName(name);
+    if (idx < 0)
+      idx = ThemeRegistry::indexOfName(name + " (user)");
+    if (idx >= 0)
+      chooseUiTheme(idx);
+    return idx >= 0;
+  };
+  // Already the repository's version, installed or built in: just use it.
+  if (const auto st = communityStateOf(entry);
+      st == CommunityThemes::State::Installed || st == CommunityThemes::State::BuiltIn) {
+    pick(entry.name);
+    refreshCommunityThemesWindow();
+    return;
+  }
+  if (communityBusy)
+    return;
+  communityBusy = true;
+  communityStatus = "Downloading " + entry.name + "...";
+  refreshCommunityThemesWindow();
+  juce::Component::SafePointer<MainComponent> safeThis(this);
+  juce::Thread::launch([safeThis, entry, pick] {
+    const auto data = CommunityThemes::fetch(juce::String(CommunityThemes::kRawBase) + "themes/" + entry.file,
+                                             ThemeFile::kMaxFileBytes);
+    juce::MessageManager::callAsync([safeThis, entry, data, pick] {
+      if (safeThis == nullptr)
+        return;
+      auto& self = *safeThis;
+      self.communityBusy = false;
+      EditorTheme theme;
+      juce::String error;
+      if (!data)
+        error = "the download failed (offline?)";
+      else if (CommunityThemes::sha256Of(*data) != entry.sha256)
+        error = "the file changed since the list was read; choose Check Now";
+      else if (!ThemeFile::fromJson(data->toString(), ThemeRegistry::get(1), theme, error))
+        error = "not a theme file: " + error;
+
+      if (error.isEmpty()) {
+        const auto themes = ThemeFile::userFolder();
+        themes.createDirectory();
+        if (!themes.getChildFile(entry.file).replaceWithData(data->getData(), data->getSize()))
+          error = "could not write it in " + themes.getFullPathName();
+      }
+      if (error.isEmpty()) {
+        ThemeRegistry::reloadUserThemes();
+        pick(theme.name);
+        self.communityStatus = entry.name + " installed and in use.";
+      } else {
+        self.communityStatus = "Could not install " + entry.name + ": " + error + ".";
+      }
+      self.refreshCommunityThemesWindow();
+    });
+  });
+}
+
+void MainComponent::showThemeEditor() {
+  showThemesDialog(ThemesDialog::Colours);
+}
+
+void MainComponent::showThemesDialog(ThemesDialog::Page page) {
+  if (themesDialog != nullptr) {
+    themesDialog->showPage(page);
+    themesDialog->toFront(true);
+    return;
+  }
+  auto* dlg = ThemesDialog::show(this);
+  themesDialog = dlg;
+  dlg->onChooseTheme = [this](int index) { chooseUiTheme(index); };
+  dlg->onFileAction = [this](int id) { menuItemSelected(id, 0); };   // the same actions the old submenu had
+  dlg->colours().onChange = [this](const EditorTheme& t) { applyThemeLive(t); };
+  dlg->colours().currentRender = [this] { return editorOptions.renderStyle(); };
+  dlg->colours().onSaved = [this](const EditorTheme& t, const juce::File&) {
+    ThemeRegistry::reloadUserThemes();
+    const int idx = ThemeRegistry::indexOfName(t.name);
+    if (idx >= 0)
+      chooseUiTheme(idx);
+    syncThemesDialog();
+  };
+  dlg->community().onInstall = [this](const CommunityThemes::Entry& e) { installCommunityTheme(e); };
+  dlg->community().onCheckNow = [this] { checkCommunityThemes(true); };
+  dlg->onPageShown = [this](ThemesDialog::Page p) {
+    if (p == ThemesDialog::Colours) {
+      const auto& cur = ThemeRegistry::get(editorOptions.uiThemeIndex);
+      const bool builtin = ThemeRegistry::findBuiltin(cur.name) != nullptr;
+      themesDialog->colours().setTheme(cur, builtin ? cur.name : "Dark");
+    } else if (p == ThemesDialog::Community) {
+      // The badges show what was new when the page opened; from then on it all counts as seen.
+      communitySeenWhenOpened = juce::StringArray::fromLines(editorOptions.communityThemesSeen);
+      if (communityStatus.isEmpty())
+        communityStatus = communityThemes.empty() ? "No list yet."
+                                                  : "The list from the last check. Check Now looks again.";
+      refreshCommunityThemesWindow();
+      // Nothing in the repository yet, or the cached list is old: look now.
+      if (communityThemes.empty())
+        checkCommunityThemes(true);
+    } else {
+      syncThemesDialog();
+    }
+  };
+  dlg->onClosed = [this] {
+    // Closing puts the chosen theme back, whatever the Colours page was showing live. The pointer is
+    // made out here: MSVC reads `this` inside an init-capture as the lambda itself.
+    juce::Component::SafePointer<MainComponent> safe(this);
+    juce::MessageManager::callAsync([safe] {
+      if (safe == nullptr) return;
+      safe->applyUiTheme(safe->editorOptions.uiThemeIndex, false);
+      safe->menuItemsChanged();
+    });
+  };
+  syncThemesDialog();
+  dlg->showPage(page);
+}
+
+void MainComponent::applyThemeLive(const EditorTheme& theme) {
   AppTheme::setPalette(theme.app);
   auto canvasScheme = theme.makeCanvas();
   canvasScheme.wireframe = editorOptions.wireframe;
+  canvasScheme.skeuomorphic = editorOptions.hardwareLook;
+  canvasScheme.knobStyle = editorOptions.hardwareKnobStyle;
+  canvasScheme.flatKnobs = editorOptions.flatKnobs;
   mainLayout->setTheme(canvasScheme);
   mainLayout->applyTheme();
   if (presetBrowserWindow)
     presetBrowserWindow->applyTheme();
   if (knobFloaterWindow)
+  {
     knobFloaterWindow->applyTheme();
+    knobFloaterWindow->setKnobScheme(activeCanvas().getTheme());
+  }
   if (keyboardFloaterWindow)
     keyboardFloaterWindow->applyTheme();
   if (patchNotesFloaterWindow)
@@ -2618,9 +3990,6 @@ void MainComponent::applyUiTheme(int index, bool persist) {
   // (the native macOS menu keeps the stale tick otherwise). Covers every path:
   // View menu, Ctrl+T cycle, and the Editor Options dialog.
   menuItemsChanged();
-
-  if (persist)
-    editorOptions.save(appProperties.getUserSettings());
 }
 
 void MainComponent::toggleWireframe() {
@@ -2694,7 +4063,86 @@ void MainComponent::choosePresetLibraryFolder() {
       });
 }
 
+juce::MemoryBlock MainComponent::captureSessionState() {
+  SessionState state;
+  state.activeSlot = activeSlot;
+
+  // The same files "Save patch" writes, so what comes back is what would have been
+  // saved: the .pch, and the .var when there are variations.
+  const auto dir = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                       .getNonexistentChildFile("nme-session", {}, false);
+  if (!dir.createDirectory().wasOk())
+    return state.toBlock();
+
+  for (int slot = 0; slot < numSlots; ++slot) {
+    if (slotPatches[slot] == nullptr)
+      continue;
+    flushExtras(slot);   // comments typed a moment ago are not in the patch yet
+    const auto file = dir.getChildFile("slot" + juce::String(slot) + ".pch");
+    if (!saveSlotPatchToFile(slot, file))
+      continue;
+    SessionSlot s;
+    s.slot = slot;
+    s.name = slotPatches[slot]->getName();
+    file.loadFileAsData(s.pch);
+    const auto var = file.withFileExtension("var");
+    if (var.existsAsFile())
+      var.loadFileAsData(s.var);
+    state.slots.push_back(std::move(s));
+  }
+
+  dir.deleteRecursively();
+  return state.toBlock();
+}
+
+void MainComponent::restoreSessionState(const juce::MemoryBlock& block) {
+  SessionState state;
+  if (!SessionState::fromBlock(block.getData(), block.getSize(), state) || state.slots.empty())
+    return;
+
+  const auto dir = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                       .getNonexistentChildFile("nme-session", {}, false);
+  if (!dir.createDirectory().wasOk())
+    return;
+
+  int restored = 0;
+  for (const auto& s : state.slots) {
+    if (s.slot < 0 || s.slot >= numSlots)
+      continue;
+    // A folder per slot, so two patches with the same name do not meet; the file is named
+    // after the patch because a .pch carries no name of its own.
+    const auto folder = dir.getChildFile("slot" + juce::String(s.slot));
+    const auto name = juce::File::createLegalFileName(s.name.isEmpty() ? juce::String("Patch") : s.name);
+    const auto file = folder.getChildFile(name + ".pch");
+    if (!folder.createDirectory().wasOk() || !file.replaceWithData(s.pch.getData(), s.pch.getSize()))
+      continue;
+    if (s.var.getSize() > 0)
+      file.withFileExtension("var").replaceWithData(s.var.getData(), s.var.getSize());
+    loadPatchFromFile(file, s.slot, /*localOnly=*/true);
+    slotPatchFiles[s.slot] = juce::File();   // the temp file is going; Save must ask where
+    ++restored;
+  }
+  dir.deleteRecursively();
+
+  if (state.activeSlot >= 0 && state.activeSlot < numSlots && state.activeSlot != activeSlot)
+    switchToSlot(state.activeSlot);
+  if (restored > 0)
+    mainLayout->getStatusBar().showMessage(
+        "Restored " + juce::String(restored) + (restored == 1 ? " patch" : " patches")
+            + " from the project (editor only: nothing was sent to the synth)", 6000);
+}
+
+// Zoom of the whole interface (#105). Only the standalone app owns the desktop:
+// as a plugin this would rescale the host's windows too.
+void MainComponent::applyInterfaceScale(float scale) {
+  if (juce::JUCEApplicationBase::isStandaloneApp())
+    juce::Desktop::getInstance().setGlobalScaleFactor(scale);
+}
+
 void MainComponent::togglePresetBrowser() {
+  // The browser is the right panel's Disk tab: with the panel folded away
+  // (Ctrl+Shift+I) choosing the tab showed nothing at all (#107).
+  mainLayout->setRightPanelVisible(true);
   mainLayout->getDiskPresetBrowser().setLibraryRoot(editorOptions.presetLibraryRoot);
   mainLayout->showDiskPresetBrowser();
 }
@@ -2709,6 +4157,9 @@ void MainComponent::showPresetBrowser() {
     };
     presetBrowserWindow->onSnippetChosen = [this](const juce::File& file) {
       importSnippetFromFile(activeSlot, file);
+    };
+    presetBrowserWindow->onSetChosen = [this](const juce::File& file) {
+      loadSlotSet(file);
     };
     presetBrowserWindow->onChooseLibraryFolder = [this]() {
       choosePresetLibraryFolder();
@@ -2780,12 +4231,12 @@ void MainComponent::saveMdiLayout() {
   auto& area = mainLayout->getPatchArea();
   const bool freeMode = area.getTileMode() == SlotMdiArea::TileMode::Free;
 
-  int openMask = 0;
+  uint32_t openMask = 0;
   for (int i = 0; i < numSlots; ++i)
     if (area.isSlotOpen(i))
-      openMask |= (1 << i);
+      openMask |= (1u << i);
 
-  settings->setValue("mdiOpenSlots", openMask);
+  settings->setValue("mdiOpenSlots", static_cast<int>(openMask));
   settings->setValue("mdiFocusedSlot", activeSlot);
   settings->setValue("mdiFreeLayout", freeMode);
   settings->setValue("mdiFocusMode", area.isFocusMode());
@@ -2795,7 +4246,7 @@ void MainComponent::saveMdiLayout() {
   // zeroes for a closed slot would restore as an empty rectangle.
   if (freeMode)
     for (int i = 0; i < numSlots; ++i) {
-      const auto key = "mdiSlot" + juce::String::charToString(static_cast<char>('A' + i));
+      const auto key = "mdiSlot" + SynthSlot::key(i);
       const auto bounds = area.getNormalisedSlotBounds(i);
       settings->setValue(key + "X", bounds.getX());
       settings->setValue(key + "Y", bounds.getY());
@@ -2824,22 +4275,33 @@ void MainComponent::restoreMdiLayout() {
   // left. Connecting reconciles it once against the synth's enabled slots
   // (reconcileSlotWindowsWithSynth), so a session started offline still opens
   // where the user left it rather than on an empty work area.
-  area.setTileOrderString(settings->getValue("mdiTileOrder", "0123"));
+  {
+    juce::String identity;
+    for (int i = 0; i < numSlots; ++i)
+      identity += SynthSlot::orderChar(i);
+    area.setTileOrderString(settings->getValue("mdiTileOrder", identity));
+  }
 
   // Default to the slot that is already open, so a first run and a corrupt or
   // empty mask both land somewhere sensible rather than on an empty work area.
-  int openMask = settings->getIntValue("mdiOpenSlots", 1 << activeSlot);
-  if ((openMask & 0x0f) == 0)
-    openMask = 1 << activeSlot;
+  uint32_t openMask = static_cast<uint32_t>(settings->getIntValue("mdiOpenSlots", static_cast<int>(1u << activeSlot)));
+  // Only Port 1's windows come back on their own: the other synths' open with the synths, when
+  // they connect (reconcileSlotWindowsWithSynth), or the work area starts full of empty windows
+  // for synths that are not there.
+  // Editor Options can ask for the last session's windows instead, all of them.
+  if (!editorOptions.restoreAllWindows)
+    openMask &= (1u << kSlotsPerSynth) - 1;
+  if (openMask == 0)
+    openMask = 1u << SynthSlot::localOf(activeSlot);
 
   for (int i = 0; i < numSlots; ++i)
-    if (openMask & (1 << i))
+    if (openMask & (1u << i))
       area.openSlot(i);
 
   if (settings->getBoolValue("mdiFreeLayout", false)) {
     area.setTileMode(SlotMdiArea::TileMode::Free);
     for (int i = 0; i < numSlots; ++i) {
-      const auto key = "mdiSlot" + juce::String::charToString(static_cast<char>('A' + i));
+      const auto key = "mdiSlot" + SynthSlot::key(i);
       area.setNormalisedSlotBounds(i,
           { (float) settings->getDoubleValue(key + "X"),
             (float) settings->getDoubleValue(key + "Y"),
@@ -2854,7 +4316,7 @@ void MainComponent::restoreMdiLayout() {
             << " tileOrder=" << mainLayout->getPatchArea().getTileOrderString() << std::endl;
 
   const int focused = settings->getIntValue("mdiFocusedSlot", activeSlot);
-  if (focused >= 0 && focused < numSlots && (openMask & (1 << focused)))
+  if (focused >= 0 && focused < numSlots && (openMask & (1u << focused)))
     switchToSlot(focused, /*notifySynth=*/false);
 
   // Last, so it maximises the slot that ended up focused.
@@ -2868,44 +4330,51 @@ void MainComponent::restoreMdiLayout() {
 // is consulted exactly once per connection: the work area adopts the slots the
 // Nord currently has enabled, and from then on opening and closing sub-windows
 // is the user's business alone.
-void MainComponent::scheduleSlotWindowReconcile() {
-  if (slotWindowsReconciled || slotWindowsReconcileScheduled)
+void MainComponent::scheduleSlotWindowReconcile(int synth) {
+  auto& state = synthState[static_cast<size_t>(synth)];
+  if (state.windowsReconciled || state.windowsReconcileScheduled)
     return;
 
-  slotWindowsReconcileScheduled = true;
+  state.windowsReconcileScheduled = true;
 
   // SlotsSelected (the mask) and SlotActivated (the focused slot) are separate
   // messages arriving in either order during the connect handshake. Let both
   // land before reconciling, or a mask processed first pairs with a stale
   // focused slot and leaves a spurious window open for the rest of the session.
   juce::Component::SafePointer<MainComponent> safeThis(this);
-  juce::Timer::callAfterDelay(400, [safeThis]() {
-    if (safeThis == nullptr || !safeThis->slotWindowsReconcileScheduled)
+  juce::Timer::callAfterDelay(400, [safeThis, synth]() {
+    if (safeThis == nullptr)
       return;
-    safeThis->slotWindowsReconcileScheduled = false;
-    if (safeThis->slotEnableStateKnown)
-      safeThis->reconcileSlotWindowsWithSynth(safeThis->lastEnabledSlots);
+    auto& st = safeThis->synthState[static_cast<size_t>(synth)];
+    if (!st.windowsReconcileScheduled)
+      return;
+    st.windowsReconcileScheduled = false;
+    if (st.enableStateKnown)
+      safeThis->reconcileSlotWindowsWithSynth(synth, st.lastEnabled);
   });
 }
 
-void MainComponent::reconcileSlotWindowsWithSynth(const std::array<bool, 4>& enabled) {
+// Only the windows of this synth's slots: the others belong to the other synths.
+void MainComponent::reconcileSlotWindowsWithSynth(int synth, const std::array<bool, 4>& enabled) {
   if (mainLayout == nullptr)
     return;
 
-  slotWindowsReconciled = true;
+  synthState[static_cast<size_t>(synth)].windowsReconciled = true;
 
   auto& area = mainLayout->getPatchArea();
-  const int focused = juce::jlimit(0, numSlots - 1, connectionManager.getCurrentSlot());
+  const int first = SynthSlot::global(synth, 0);
+  const int focused = SynthSlot::global(synth, juce::jlimit(0, kSlotsPerSynth - 1,
+                                                            synthHub.synth(synth).getCurrentSlot()));
 
-  int desiredMask = 1 << focused;  // focused slot must always remain reachable
-  for (int slot = 0; slot < numSlots; ++slot)
-    if (enabled[static_cast<size_t>(slot)])
-      desiredMask |= 1 << slot;
+  uint32_t desiredMask = 1u << focused;  // focused slot must always remain reachable
+  for (int l = 0; l < slotsOfSynth(synth); ++l)
+    if (enabled[static_cast<size_t>(l)])
+      desiredMask |= 1u << (first + l);
 
-  int currentMask = 0;
-  for (int slot = 0; slot < numSlots; ++slot)
-    if (area.isSlotOpen(slot))
-      currentMask |= 1 << slot;
+  uint32_t currentMask = 0;
+  for (int l = 0; l < kSlotsPerSynth; ++l)
+    if (area.isSlotOpen(first + l))
+      currentMask |= 1u << (first + l);
 
   if (currentMask == desiredMask) {
     std::cout << "[MDI] Slot windows already match the synth: mask=" << desiredMask
@@ -2924,17 +4393,18 @@ void MainComponent::reconcileSlotWindowsWithSynth(const std::array<bool, 4>& ena
     // layout is being replaced by the synth's.
     {
       const juce::ScopedValueSetter<bool> focusGuard(inSlotFocusChange, true);
-      for (int slot = 0; slot < numSlots; ++slot)
-        if ((desiredMask & (1 << slot)) != 0 && !area.isSlotOpen(slot))
+      for (int slot = first; slot < first + kSlotsPerSynth; ++slot)
+        if ((desiredMask & (1u << slot)) != 0 && !area.isSlotOpen(slot))
           area.openSlot(slot);
     }
 
     // Adopt hardware focus before closing anything; onSlotClosed is suppressed
     // by syncGuard, so this reconciliation never sends a slot command back.
-    switchToSlot(focused, /*notifySynth=*/false, /*bringOnScreen=*/false);
+    if (synth == synthHub.activeSynth())
+      switchToSlot(focused, /*notifySynth=*/false, /*bringOnScreen=*/false);
 
-    for (int slot = 0; slot < numSlots; ++slot)
-      if ((desiredMask & (1 << slot)) == 0 && area.isSlotOpen(slot))
+    for (int slot = first; slot < first + kSlotsPerSynth; ++slot)
+      if ((desiredMask & (1u << slot)) == 0 && area.isSlotOpen(slot))
         area.closeSlot(slot);
 
     // A restored F11 state would leave the newly opened windows underneath the
@@ -2949,7 +4419,7 @@ void MainComponent::reconcileSlotWindowsWithSynth(const std::array<bool, 4>& ena
       if (auto* settings = appProperties.getUserSettings())
         for (int slot = 0; slot < numSlots; ++slot) {
           if (!area.isSlotOpen(slot)) continue;
-          const auto key = "mdiSlot" + juce::String::charToString(static_cast<char>('A' + slot));
+          const auto key = "mdiSlot" + SynthSlot::key(slot);
           area.setNormalisedSlotBounds(slot,
               { (float) settings->getDoubleValue(key + "X"),
                 (float) settings->getDoubleValue(key + "Y"),
@@ -2962,7 +4432,7 @@ void MainComponent::reconcileSlotWindowsWithSynth(const std::array<bool, 4>& ena
 
   saveMdiLayout();
   std::cout << "[MDI] Reconciled slot windows with the synth: mask=" << desiredMask
-            << " focused=" << static_cast<char>('A' + focused)
+            << " focused=" << SynthSlot::label(focused)
             << " open=" << area.getNumOpenSlots() << std::endl;
 }
 
@@ -3025,7 +4495,7 @@ void MainComponent::toggleKnobFloater() {
     // Same path as the canvas parameter callbacks (live change + undo on drag end)
     knobFloaterWindow->onParameterChanged =
         [this](int section, int moduleId, int parameterId, int value) {
-          connectionManager.sendParameter(activeSlot, section, moduleId, parameterId, value);
+          synthHub.sendParameterFromUser(activeSlot, section, moduleId, parameterId, value);
           canvasFor(activeSlot).repaintCanvas();
         };
     knobFloaterWindow->onParameterDragComplete =
@@ -3036,7 +4506,7 @@ void MainComponent::toggleKnobFloater() {
               *undoContext(), section, moduleId, parameterId, oldValue, newValue));
         };
     knobFloaterWindow->onMorphChanged = [this](int morphIndex, int value) {
-      connectionManager.sendParameter(activeSlot, 2, 1, morphIndex, value);
+      synthHub.sendParameterFromUser(activeSlot, 2, 1, morphIndex, value);
       mainLayout->getHeaderBar().repaint();
     };
     knobFloaterWindow->onReassignRequested = [this](int fromKnob, int toKnob) {
@@ -3050,6 +4520,7 @@ void MainComponent::toggleKnobFloater() {
   }
 
   knobFloaterWindow->applyTheme();
+  knobFloaterWindow->setKnobScheme(activeCanvas().getTheme());
   knobFloaterWindow->setPatch(currentPatch().get());
   showFloaterWindow(*knobFloaterWindow, "knobFloater");
 }
@@ -3069,10 +4540,10 @@ void MainComponent::toggleKeyboardFloater() {
         [this](const juce::KeyPress& k) { return handleFloaterShortcut(k); };
 
     keyboardFloaterWindow->onNoteOn = [this](int note, int velocity) {
-      connectionManager.sendNoteOn(note, velocity);
+      synthHub.active().sendNoteOn(note, velocity);
     };
     keyboardFloaterWindow->onNoteOff = [this](int note) {
-      connectionManager.sendNoteOff(note);
+      synthHub.active().sendNoteOff(note);
     };
   }
 
@@ -3106,7 +4577,7 @@ bool MainComponent::handleFloaterShortcut(const juce::KeyPress& key) {
   if (code == 127) code = '8';  // X11 legacy: Ctrl+8 arrives as DEL (0x7F)
   switch (code) {
     case '1': case '2': case '3': case '4':
-      switchToSlot(code - '1');
+      switchToSlot(SynthSlot::global(synthHub.activeSynth(), code - '1'));
       return true;
     case '5': toggleKnobFloater(); return true;
     case '6': toggleKeyboardFloater(); return true;
@@ -3117,9 +4588,7 @@ bool MainComponent::handleFloaterShortcut(const juce::KeyPress& key) {
       // Ctrl+T cycles the theme from the main window (MainComponent::
       // keyPressed) — forward it here too so it also works while a floater
       // or slot window has keyboard focus instead of only the main one.
-      applyUiTheme(editorOptions.uiThemeIndex + 1, true);
-      mainLayout->getStatusBar().showMessage(
-          "Theme: " + ThemeRegistry::get(editorOptions.uiThemeIndex).name, 2500);
+      cycleUiThemeFromKey();
       return true;
     default: return false;
   }
@@ -3222,6 +4691,21 @@ void MainComponent::toggleMutatorWindow() {
         applySnapshot(snap, "Mutator Audition");
     };
 
+    panel.onModuleTypes = [this]() -> Mutator::ModuleTypes {
+      if (!currentPatch()) return {};
+      return Mutator::moduleTypes(*currentPatch());
+    };
+
+    // The G2 keeps its variations in line with the patch too
+    panel.onLayoutChanged = [this](const Mutator::ModuleTypes& before,
+                                   const Mutator::ModuleTypes& now) {
+      if (!currentPatch()) return;
+      const auto current = Mutator::captureCurrent(*currentPatch());
+      for (auto& slot : variations[activeSlot].slots)
+        slot = Mutator::conform(slot, current, before, now);
+      mutatorWindow->getPanel().setVariations(variations[activeSlot]);
+    };
+
     panel.onStoreToVariation = [this](int index, const ParamSnapshot& snap) {
       if (!currentPatch() || index < 0 || index >= PatchVariations::kNumSlots || !snap.filled)
         return;
@@ -3314,7 +4798,7 @@ void MainComponent::wireSlotView(int slot) {
 
   // Canvas -> synth (live parameter changes)
   canvas.setParameterChangeCallback([this, slot](int section, int moduleId, int parameterId, int value) {
-    connectionManager.sendParameter(slot, section, moduleId, parameterId, value);
+    synthHub.sendParameterFromUser(slot, section, moduleId, parameterId, value);
     if (slot == activeSlot) {
       // The inspector lists the selected module's values, so a knob turned on
       // the canvas has to read true there as it moves.
@@ -3354,6 +4838,35 @@ void MainComponent::wireSlotView(int slot) {
   canvas.setDeleteModuleCallback([patch, ctx, undoMgr, updateLoad](int section, Module* module) {
     if (!patch() || !ctx() || !module) return;
     undoMgr().perform(new DeleteModuleAction(*ctx(), section, module));
+    updateLoad();
+  });
+  // The canvas has already opened the transaction and dropped its selection.
+  canvas.setReplaceModuleCallback([this, slot, patch, ctx, undoMgr, updateLoad]
+      (int section, Module* module, int newTypeId) {
+    if (!patch() || !ctx() || !module) return;
+    const auto* newDesc = moduleDescs.getModuleByIndex(newTypeId);
+    if (newDesc == nullptr) return;
+    const juce::String oldName = module->getDescriptor()->name;
+    prepareSlotModuleDeletion(slot);
+
+    auto* action = new ReplaceModuleAction(*ctx(), section, module, newTypeId);
+    const int droppedCables = action->getDroppedCables();
+    const int droppedAssignments = action->getDroppedAssignments();
+    if (!undoMgr().perform(action)) {
+      mainLayout->getStatusBar().showMessage(
+          "Cannot replace " + oldName + " with " + newDesc->name
+          + ": no room below it in the column, or the module limit is reached", 6000);
+      updateLoad();
+      return;
+    }
+
+    juce::String message = "Replaced " + oldName + " with " + newDesc->name;
+    if (droppedCables > 0)
+      message << " - " << droppedCables << (droppedCables == 1 ? " cable" : " cables") << " dropped";
+    if (droppedAssignments > 0)
+      message << " - " << droppedAssignments
+              << (droppedAssignments == 1 ? " assignment" : " assignments") << " dropped";
+    mainLayout->getStatusBar().showMessage(message, 6000);
     updateLoad();
   });
   canvas.setModuleMoveCallback([patch, ctx, undoMgr]
@@ -3545,75 +5058,317 @@ void MainComponent::handleSlotFileCommand(int slot, const juce::String& cmd) {
     }
   }
 }
-void MainComponent::handleConnectionRequest(const juce::String &inputId,
+void MainComponent::handleConnectionRequest(int synth, const juce::String &inputId,
                                             const juce::String &outputId) {
-  lastInputId = inputId;
-  lastOutputId = outputId;
-  connectionManager.connect(inputId, outputId);
+  synthState[static_cast<size_t>(synth)].lastInputId = inputId;
+  synthState[static_cast<size_t>(synth)].lastOutputId = outputId;
+  synthHub.synth(synth).connect(inputId, outputId);
 }
 
-void MainComponent::handleDisconnectionRequest() {
+bool MainComponent::refetchSlotFromSynth(int slot, juce::String &error) {
+  if (!synthHub.active().isConnected()) {
+    error = "No synth connected";
+    return false;
+  }
+  if (slot < 0 || slot >= numSlots) {
+    error = "slot must be 0-3";
+    return false;
+  }
+  if (synthHub.active().isFetchingPatch() || synthHub.active().isUploadingPatch()) {
+    error = "A patch transfer is already in flight; retry when get_synth_status says it is idle";
+    return false;
+  }
+  synthHub.requestPatch(slot);
+  return true;
+}
+
+void MainComponent::handleDisconnectionRequest(int synth) {
   // Release any held virtual-keyboard notes while the port is still open
   if (keyboardFloaterWindow)
     keyboardFloaterWindow->allNotesOff();
-  connectionManager.disconnect();
+  synthHub.synth(synth).disconnect();
 }
 
 void MainComponent::onConnectionStatusChanged(
-    const ConnectionManager::Status &status) {
+    int synth, const ConnectionManager::Status &status) {
   bool connected = (status.state == ConnectionManager::State::Connected);
+  auto& state = synthState[static_cast<size_t>(synth)];
+  const bool isActive = (synth == synthHub.activeSynth());
+  // A Micro Modular has one slot: its row in the slot bar shows one button.
+  mainLayout->getSlotBar().setSlotCount(synth, slotsOfSynth(synth));
+  {
+    auto* info = new juce::DynamicObject();
+    info->setProperty("state", connected ? "connected"
+                               : status.state == ConnectionManager::State::Connecting ? "connecting"
+                                                                                      : "disconnected");
+    info->setProperty("message", status.message);
+    info->setProperty("synth", synth);
+    mcpEventLog.record("connection", -1, juce::var(info));
+  }
+  // Without this the dialog kept the state it opened with: Connect stayed Connect
+  // after the handshake, and a lost connection still offered Disconnect.
+  if (midiSettingsDialog != nullptr)
+    midiSettingsDialog->setPortStatus(synth, status);
   if (!connected) {
+    // Some of what follows is only for a connection that is really closed: a synth that is slow
+    // to answer is "Disconnected" with its ports (or link) still open, and answers later.
+    const bool portsGone = !synthHub.synth(synth).hasOpenPorts();
+    if (portsGone)
+      state.autoNameTried = false;
+
     // Reconciling with the synth is a once-per-connection thing, so losing the
     // connection arms it again for the next one.
-    slotEnableStateKnown = false;
-    slotWindowsReconciled = false;
-    slotWindowsReconcileScheduled = false;
+    state.enableStateKnown = false;
+    // The next synth to answer may be a different one (a real G1, then G1-Emu):
+    // its name must not be reported until its own settings arrive.
+    state.settingsKnown = false;
+    // Nor can the slots be taken to match it. Until a slot is fetched again it
+    // is LOCAL and sends nothing: switching from G1-Emu to a real G1 left slot A
+    // showing the emulator's patch, not LOCAL and with its synchronizer on, for
+    // the seconds before the fetch, so an edit then went to the real synth's
+    // own patch in that slot. Only this synth's slots: the others are still talking.
+    for (int l = 0; l < kSlotsPerSynth; ++l) {
+      const int s = SynthSlot::global(synth, l);
+      if (!slotPatches[s])
+        continue;
+      slotSynchronizers[s].reset();
+      setSlotLocal(s, true);
+    }
+    state.windowsReconciled = false;
+    state.windowsReconcileScheduled = false;
+
+    // A synth that is gone takes its windows with it (Port 1's stay: it is the editor's own
+    // work area even with no synth). They come back when it connects again.
+    if (synth > 0 && status.state == ConnectionManager::State::Disconnected && portsGone
+        && mainLayout != nullptr && !editorOptions.restoreAllWindows) {
+      auto& area = mainLayout->getPatchArea();
+      const juce::ScopedValueSetter<bool> syncGuard(syncingSlotWindows, true);
+      for (int l = 0; l < kSlotsPerSynth; ++l) {
+        const int s = SynthSlot::global(synth, l);
+        if (area.isSlotOpen(s) && area.getNumOpenSlots() > 1)
+          area.closeSlot(s);
+      }
+    }
+
+    // An emulator this editor connected by itself is gone (closed, or its plugin instance
+    // removed): its port is switched off again, so its row goes and the next one can take it.
+    if (status.state == ConnectionManager::State::Disconnected && portsGone
+        && DirectLink::isDeviceId(state.lastInputId))
+      if (auto* st = appProperties.getUserSettings())
+        if (st->getBoolValue(portKey("midiAutoPort", synth), false)) {
+          st->setValue(portKey("midiEnabled", synth), false);
+          st->setValue(portKey("midiAutoOff", synth), true);
+          st->saveIfNeeded();
+          // If it was the synth being edited, the editor moves to one that is still there
+          // (Port 1 when none is), after this notification has been dealt with.
+          if (synth == synthHub.activeSynth()) {
+            juce::Component::SafePointer<MainComponent> safeThis(this);
+            juce::MessageManager::callAsync([safeThis, synth] {
+              if (safeThis == nullptr || safeThis->synthHub.activeSynth() != synth
+                  || safeThis->synthHub.synth(synth).isConnected())
+                return;
+              int target = 0;
+              for (int other = 0; other < kMaxSynths; ++other)
+                if (other != synth && safeThis->synthHub.synth(other).isConnected()) {
+                  target = other;
+                  break;
+                }
+              if (target == synth)
+                return;
+              auto& cm = safeThis->synthHub.synth(target);
+              safeThis->switchToSlot(SynthSlot::global(target, cm.isConnected() ? cm.getCurrentSlot() : 0));
+            });
+          }
+        }
   }
+
+  // Every synth, not only the one being edited: its ports are remembered, and it is asked for
+  // its settings (where its name is) and its bank list, and the slots it is known to hold send
+  // their edits again.
+  if (connected) {
+    saveMidiSettings(synth, state.lastInputId, state.lastOutputId);
+    for (int l = 0; l < kSlotsPerSynth; ++l) {
+      const int s = SynthSlot::global(synth, l);
+      if (slotPatches[s] && !slotSynchronizers[s] && !slotIsLocal[s]) {
+        slotSynchronizers[s] = std::make_unique<PatchSynchronizer>(
+            *slotPatches[s], synthHub.synth(synth), l);
+        std::cout << "[SYNC] Patch synchronizer enabled on connection, slot " << SynthSlot::label(s) << std::endl;
+      }
+    }
+    synthHub.synth(synth).requestPatchList();
+    synthHub.synth(synth).requestSynthSettings();
+  }
+  updateSlotBarRows();
+
+  // Every synth's name, in the slot bar and on its windows, whether or not it is the one being edited.
+  if (!connected)
+    setSynthDisplayName(synth, {});
+  else if (state.settingsKnown && !state.settings.name.empty())
+    setSynthDisplayName(synth, juce::String(state.settings.name));
+  else
+    setSynthDisplayName(synth, "Modular");
+
+  if (!isActive)
+    return;   // what follows is the editor's own display: it shows the synth being edited
+
   mainLayout->getStatusBar().setConnectionStatus(status.message, connected);
+  mainLayout->getStatusBar().setSynthLink(
+      SynthLink::describe(connected, synthHub.synth(synth).getConnectedPortName()));
   menuItemsChanged(); // rebuild native macOS menu bar to update enabled states
   updateStoreLocationDisplay();  // storing needs a synth to store into
 
   if (connected) {
-    // Save settings on successful connection
-    saveMidiSettings(lastInputId, lastOutputId);
-
     // Patch loading is triggered by SlotActivated (sc=0x09) from synth,
     // with a fallback timer in ConnectionManager if no slot message arrives.
-
-    // Enable synchronizer if we have a patch loaded
-    if (currentPatch() && !currentSynchronizer()) {
-      currentSynchronizer() = std::make_unique<PatchSynchronizer>(
-          *currentPatch(), connectionManager, activeSlot);
-      std::cout << "[SYNC] Patch synchronizer enabled on connection" << std::endl;
-    }
+    // The ports, the settings and bank list requests and the synchronizers were
+    // seen to above, for every synth.
 
     // Show synth name in header bar (will be replaced by real name from SynthSettings later)
     mainLayout->getHeaderBar().setSynthName("Nord Modular");
-
-    connectionManager.requestPatchList();
-    connectionManager.requestSynthSettings();
+    mainLayout->getPatchBrowser().setLoadingState(true);
   } else {
-    // Disable all synchronizers on disconnect
-    for (int s = 0; s < numSlots; ++s)
-      slotSynchronizers[s].reset();
-    // Visual reset of the virtual keyboard (sends are no-ops while disconnected)
+    // Disable the synchronizers of this synth's slots (done above); the keyboard
+    // and the header belong to the synth being edited.
     if (keyboardFloaterWindow)
       keyboardFloaterWindow->allNotesOff();
     mainLayout->getHeaderBar().setSynthName({});
     mainLayout->getHeaderBar().setSynthDspLoad(-1, -1, -1, -1);
-    std::cout << "[SYNC] All slot synchronizers disabled on disconnect" << std::endl;
+    std::cout << "[SYNC] Slot synchronizers of synth " << synth << " disabled on disconnect" << std::endl;
+  }
+}
+
+bool MainComponent::autoConnectEmulatorsEnabled() const {
+  auto* st = appProperties.getUserSettings();
+  return st == nullptr || st->getBoolValue("autoConnectG1Emu", true);
+}
+
+// Looks for G1-Emu instances on a background thread (each knock on a listening emulator waits for
+// its greeting) and, back on the message thread, connects every free instance to a free port.
+void MainComponent::scanForEmulators() {
+  if (!autoConnectEmulatorsEnabled() || emulatorScanRunning) {
+    if (!autoConnectEmulatorsEnabled())
+      mainLayout->getSlotBar().setWaitingEmulators(0);
+    return;
+  }
+  // Looked for even with every port taken: the ones left out are counted in the slot panel.
+
+  emulatorScanRunning = true;
+  juce::Component::SafePointer<MainComponent> safeThis(this);
+  juce::Thread::launch([safeThis] {
+    auto found = DirectLink::discover();
+    juce::MessageManager::callAsync([safeThis, found] {
+      if (safeThis == nullptr)
+        return;
+      safeThis->emulatorScanRunning = false;
+      safeThis->connectFoundEmulators(found);
+    });
+  });
+}
+
+// A port an emulator may take: switched on in MIDI Setup (or never set), not connected, not
+// trying to connect, and not kept for MIDI ports of its own that are still around.
+bool MainComponent::isPortFreeForEmulator(int synth) const {
+  const auto& cm = synthHub.synth(synth);
+  if (cm.isConnected() || cm.getStatus().state == ConnectionManager::State::Connecting
+      || cm.hasOpenPorts())   // still listening to a synth that has not answered yet
+    return false;
+  // A port switched off by hand stays off; one this editor switched off when its emulator went
+  // away is free again.
+  auto* st = appProperties.getUserSettings();
+  if (st != nullptr && !st->getBoolValue(portKey("midiEnabled", synth), true)
+      && !st->getBoolValue(portKey("midiAutoOff", synth), false))
+    return false;
+  const auto& saved = synthState[static_cast<size_t>(synth)].lastInputId;
+  if (saved.isEmpty() || DirectLink::isDeviceId(saved))
+    return true;
+  // MIDI ports only: listing the direct links would knock on every emulator from here.
+  for (const auto& d : juce::MidiInput::getAvailableDevices())
+    if (d.identifier == saved)
+      return false;   // its own synth is plugged in and may answer yet
+  return true;
+}
+
+void MainComponent::connectFoundEmulators(const std::vector<DirectLink::Instance>& found) {
+  // An emulator still waiting for its name gets another try on every look: the name is given when
+  // the synth's settings and a patch have both arrived, and a moment missed (the patch first, a
+  // slow emulator) left it as "Modular" until it was clicked.
+  for (int synth = 0; synth < kMaxSynths; ++synth) {
+    const auto& st = synthState[static_cast<size_t>(synth)];
+    if (st.settingsKnown && !st.autoNameTried && synthHub.synth(synth).isConnected())
+      giveDuplicateEmulatorAName(synth);
+  }
+
+  int waiting = 0;
+  struct SetWaiting {
+    MainComponent& mc; int& n;
+    ~SetWaiting() { mc.mainLayout->getSlotBar().setWaitingEmulators(n); }
+  } setWaiting { *this, waiting };
+  for (const auto& inst : found) {
+    if (inst.busy)
+      continue;   // it has an editor already (maybe this one, on another port)
+    // The same G1 already reached through its MIDI PC Port, on any port of this editor: once is enough.
+    bool onMidi = false;
+    for (int synth = 0; synth < kMaxSynths; ++synth) {
+      const auto& st = synthState[static_cast<size_t>(synth)];
+      const auto& cm = synthHub.synth(synth);
+      const bool live = cm.isConnected() || cm.getStatus().state == ConnectionManager::State::Connecting;
+      if (!live)
+        continue;
+      if (inst.pcPortIds.contains(st.lastInputId) || inst.pcPortIds.contains(st.lastOutputId))
+        onMidi = true;
+      // No ids to go by (JUCE's virtual ports on Linux): the port's name, which is the instance's own.
+      else if (inst.pcPortIds.isEmpty() && inst.pcPortName.isNotEmpty()
+               && cm.getConnectedPortName() == inst.pcPortName)
+        onMidi = true;
+    }
+    if (onMidi)
+      continue;
+    const auto id = DirectLink::deviceId(inst.port);
+    // A port that last used this very instance gets it back; otherwise the first free one.
+    int target = -1;
+    for (int synth = 0; synth < kMaxSynths && target < 0; ++synth)
+      if (isPortFreeForEmulator(synth) && synthState[static_cast<size_t>(synth)].lastInputId == id)
+        target = synth;
+    for (int synth = 0; synth < kMaxSynths && target < 0; ++synth)
+      if (isPortFreeForEmulator(synth))
+        target = synth;
+    if (target < 0) {
+      ++waiting;   // no port left for it
+      continue;
+    }
+    std::cout << "[LINK] " << inst.name << " found on port " << inst.port
+              << " - connecting it to Port " << (target + 1) << std::endl;
+    // The port is switched on for it, and remembered as switched on by the editor, so it is
+    // switched off again when the emulator goes.
+    if (auto* st = appProperties.getUserSettings()) {
+      st->setValue(portKey("midiEnabled", target), true);
+      st->setValue(portKey("midiAutoOff", target), false);
+      st->setValue(portKey("midiAutoPort", target), true);
+      st->saveIfNeeded();
+    }
+    handleConnectionRequest(target, id, id);
   }
 }
 
 void MainComponent::attemptAutoConnect() {
+  for (int synth = 0; synth < kMaxSynths; ++synth)
+    attemptAutoConnect(synth);
+}
+
+void MainComponent::attemptAutoConnect(int synth) {
   auto *settings = appProperties.getUserSettings();
   if (settings == nullptr)
     return;
 
-  auto savedInputId = settings->getValue("midiInputDevice", "");
-  auto savedOutputId = settings->getValue("midiOutputDevice", "");
-  auto savedInputName = settings->getValue("midiInputName", "");
-  auto savedOutputName = settings->getValue("midiOutputName", "");
+  // A port the user switched off in MIDI Setup is not opened.
+  if (!settings->getBoolValue(portKey("midiEnabled", synth), true))
+    return;
+  auto& state = synthState[static_cast<size_t>(synth)];
+
+  auto savedInputId = settings->getValue(portKey("midiInputDevice", synth), "");
+  auto savedOutputId = settings->getValue(portKey("midiOutputDevice", synth), "");
+  auto savedInputName = settings->getValue(portKey("midiInputName", synth), "");
+  auto savedOutputName = settings->getValue(portKey("midiOutputName", synth), "");
 
   if (savedInputId.isEmpty() && savedInputName.isEmpty())
     return;
@@ -3661,19 +5416,19 @@ void MainComponent::attemptAutoConnect() {
   }
 
   if (resolvedInputId.isNotEmpty() && resolvedOutputId.isNotEmpty()) {
-    DBG("Auto-connecting: input=" + resolvedInputId +
+    DBG("Auto-connecting synth " + juce::String(synth + 1) + ": input=" + resolvedInputId +
         " output=" + resolvedOutputId);
-    lastInputId = resolvedInputId;
-    lastOutputId = resolvedOutputId;
-    connectionManager.connect(resolvedInputId, resolvedOutputId);
+    state.lastInputId = resolvedInputId;
+    state.lastOutputId = resolvedOutputId;
+    synthHub.synth(synth).connect(resolvedInputId, resolvedOutputId);
   } else {
     // ALSA may not have enumerated devices yet — retry a few times
-    if (autoConnectRetries > 0 && (inputs.isEmpty() || outputs.isEmpty())) {
-      autoConnectRetries--;
+    if (state.autoConnectRetries > 0 && (inputs.isEmpty() || outputs.isEmpty())) {
+      state.autoConnectRetries--;
       DBG("No MIDI devices found yet, retrying in 500ms (" +
-          juce::String(autoConnectRetries) + " left)");
+          juce::String(state.autoConnectRetries) + " left)");
       juce::Component::SafePointer<MainComponent> safeThis(this);
-      juce::Timer::callAfterDelay(500, [safeThis]() { if (safeThis) safeThis->attemptAutoConnect(); });
+      juce::Timer::callAfterDelay(500, [safeThis, synth]() { if (safeThis) safeThis->attemptAutoConnect(synth); });
     } else {
       DBG("Saved MIDI ports not found (id=" + savedInputId + "/" +
           savedOutputId + " name=" + savedInputName + "/" + savedOutputName +
@@ -3682,30 +5437,30 @@ void MainComponent::attemptAutoConnect() {
   }
 }
 
-void MainComponent::saveMidiSettings(const juce::String &inputId,
+void MainComponent::saveMidiSettings(int synth, const juce::String &inputId,
                                      const juce::String &outputId) {
   auto *settings = appProperties.getUserSettings();
   if (settings == nullptr)
     return;
 
-  settings->setValue("midiInputDevice", inputId);
-  settings->setValue("midiOutputDevice", outputId);
+  settings->setValue(portKey("midiInputDevice", synth), inputId);
+  settings->setValue(portKey("midiOutputDevice", synth), outputId);
 
   // Also save device names for robust matching (ALSA identifiers can change
   // between reboots)
   for (auto &dev : ConnectionManager::getAvailableInputDevices())
     if (dev.identifier == inputId) {
-      settings->setValue("midiInputName", dev.name);
+      settings->setValue(portKey("midiInputName", synth), dev.name);
       break;
     }
   for (auto &dev : ConnectionManager::getAvailableOutputDevices())
     if (dev.identifier == outputId) {
-      settings->setValue("midiOutputName", dev.name);
+      settings->setValue(portKey("midiOutputName", synth), dev.name);
       break;
     }
 
   settings->saveIfNeeded();
-  DBG("Saved MIDI settings: input=" + inputId + " output=" + outputId);
+  DBG("Saved MIDI settings for synth " + juce::String(synth + 1) + ": input=" + inputId + " output=" + outputId);
 }
 
 // Self-owning beta warning popup using the same style as ModuleHelpPopup
@@ -3717,22 +5472,12 @@ public:
     {
         setOpaque(true);
 
-        titleLabel.setFont(juce::Font(AppTheme::uiFont(15.0f)).boldened());
-        titleLabel.setColour(juce::Label::textColourId, AppTheme::palette().accentActive);
-        titleLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
-        titleLabel.setText("Animatek NME - Beta", juce::dontSendNotification);
-        addAndMakeVisible(titleLabel);
-
-        closeButton.setButtonText("x");
-        closeButton.setColour(juce::TextButton::buttonColourId,   AppTheme::palette().backgroundPanel);
-        closeButton.setColour(juce::TextButton::buttonOnColourId, AppTheme::palette().inputBackground);
-        closeButton.setColour(juce::TextButton::textColourOffId,  AppTheme::palette().accentActive);
-        closeButton.setColour(juce::TextButton::textColourOnId,   juce::Colours::white);
+        setName("beta-warning");   // the picture-taking run knows it by this
         closeButton.onClick = [this]() { removeFromDesktop(); delete this; };
         addAndMakeVisible(closeButton);
 
-        bodyText.setFont(juce::Font(AppTheme::uiFont(13.0f)));
-        bodyText.setColour(juce::Label::textColourId, juce::Colour(0xffdddddd));
+        bodyText.setFont(juce::Font(AppTheme::uiFont(14.0f)));
+        bodyText.setColour(juce::Label::textColourId, AppTheme::palette().textSecondary);
         bodyText.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
         bodyText.setText(
             "Welcome to Animatek NME (Nord Modular Editor G1) Beta!\n\n"
@@ -3751,12 +5496,12 @@ public:
         bodyText.setMinimumHorizontalScale(1.0f);
         addAndMakeVisible(bodyText);
 
-        suppressToggle.setColour(juce::ToggleButton::textColourId, juce::Colour(0xffaaaacc));
+        suppressToggle.setColour(juce::ToggleButton::textColourId, AppTheme::palette().textMuted);
         addAndMakeVisible(suppressToggle);
 
         okButton.setButtonText("I understand, let me in!");
-        okButton.setColour(juce::TextButton::buttonColourId, AppTheme::palette().buttonActive);
-        okButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        okButton.setColour(juce::TextButton::buttonColourId, AppTheme::palette().accentActive);   // the one thing to press
+        okButton.setColour(juce::TextButton::textColourOffId, AppTheme::palette().backgroundMain);
         okButton.onClick = [this]() {
             if (suppressToggle.getToggleState()) {
                 auto* s = appProperties.getUserSettings();
@@ -3767,13 +5512,13 @@ public:
         };
         addAndMakeVisible(okButton);
 
-        setSize(440, 340);
+        setSize(540, 468);
 
         if (relativeTo) {
             auto* top = relativeTo->getTopLevelComponent();
             auto screen = top->localAreaToGlobal(top->getLocalBounds());
-            setTopLeftPosition(screen.getX() + (screen.getWidth() - 440) / 2,
-                               screen.getY() + (screen.getHeight() - 340) / 2);
+            setTopLeftPosition(screen.getX() + (screen.getWidth() - getWidth()) / 2,
+                               screen.getY() + (screen.getHeight() - getHeight()) / 2);
         }
 
         addToDesktop(juce::ComponentPeer::windowHasDropShadow);
@@ -3782,18 +5527,14 @@ public:
         grabKeyboardFocus();
     }
 
-    void paint(juce::Graphics& g) override {
-        g.fillAll(AppTheme::palette().backgroundPanel);
-        g.setColour(AppTheme::palette().buttonActive);
-        g.fillRect(0, 31, getWidth(), 1);
-    }
+    void paint(juce::Graphics& g) override { AppTheme::drawDialogChrome(g, getLocalBounds(), "Animatek NME - Beta", 40, 68); }
+    void paintOverChildren(juce::Graphics& g) override { AppTheme::drawWindowFrame(g, getLocalBounds()); }
 
     void resized() override {
-        titleLabel.setBounds(8, 0, getWidth() - 40, 32);
-        closeButton.setBounds(getWidth() - 32, 2, 28, 28);
-        bodyText.setBounds(12, 38, getWidth() - 24, 210);
-        suppressToggle.setBounds(12, getHeight() - 68, getWidth() - 24, 24);
-        okButton.setBounds((getWidth() - 200) / 2, getHeight() - 38, 200, 30);
+        closeButton.setBounds(getWidth() - 36, 6, 28, 28);
+        bodyText.setBounds(24, 52, getWidth() - 48, 300);
+        suppressToggle.setBounds(24, getHeight() - 68 - 40, getWidth() - 48, 28);
+        okButton.setBounds(getWidth() - 24 - 220, getHeight() - 68 + 16, 220, 36);
     }
 
     bool keyPressed(const juce::KeyPress& key) override {
@@ -3804,137 +5545,24 @@ public:
         return false;
     }
 
-    void mouseDown(const juce::MouseEvent& e) override { dragger.startDraggingComponent(this, e); }
-    void mouseDrag(const juce::MouseEvent& e) override { dragger.dragComponent(this, e, nullptr); }
+    void mouseDown(const juce::MouseEvent& e) override { if (e.getPosition().getY() < 40) dragger.startDraggingComponent(this, e); }
+    void mouseDrag(const juce::MouseEvent& e) override { if (e.getMouseDownPosition().getY() < 40) dragger.dragComponent(this, e, nullptr); }
 
 private:
     juce::ApplicationProperties& appProperties;
-    juce::Label titleLabel, bodyText;
-    juce::TextButton closeButton, okButton;
+    juce::Label bodyText;
+    FlatCloseButton closeButton;
+    juce::TextButton okButton;
     juce::ToggleButton suppressToggle { "Don't show this warning at startup" };
     juce::ComponentDragger dragger;
 };
 
 void MainComponent::showKeyboardShortcutsDialog() {
-  // Keep in sync with manual/07-shortcuts.md
-  static const char* shortcutsText =
-      "FILE\n"
-      "  Ctrl+N              New patch\n"
-      "  Ctrl+O              Open patch\n"
-      "  Ctrl+S              Save\n"
-      "  Ctrl+Shift+S        Save as\n"
-      "  Ctrl+B              Preset browser\n"
-      "  Ctrl+P              Patch settings\n"
-      "  Ctrl+G              Synth settings\n"
-      "  Ctrl+,              Editor options\n"
-      "  Ctrl+Q              Quit\n"
-      "\n"
-      "EDIT\n"
-      "  Ctrl+Z              Undo\n"
-      "  Ctrl+Shift+Z, Ctrl+Y  Redo\n"
-      "  Ctrl+A              Select all modules (section)\n"
-      "  Ctrl+X / C / V      Cut / copy / paste modules\n"
-      "  Ctrl+D              Duplicate with cables\n"
-      "  Delete, Backspace   Delete selection\n"
-      "  Escape              Clear selection\n"
-      "  Arrow keys          Nudge selected modules\n"
-      "  Ctrl+R              Randomize parameters\n"
-      "  Ctrl+Shift+R        Randomize (gaussian)\n"
-      "\n"
-      "CANVAS\n"
-      "  Enter, Double-click Quick Add module at mouse\n"
-      "  F1                  Module help (hovered/selected)\n"
-      "  F5                  Parameter values overlay\n"
-      "  F7                  Morph groups overlay\n"
-      "  F8                  Knob assignments overlay\n"
-      "  F9                  MIDI CC assignments overlay\n"
-      "  F3 (or F10)         Module DSP cost overlay\n"
-      "  Double-click module Module DSP cost\n"
-      "  + / -               Step the control under the pointer\n"
-      "  Z                   Zoom to selection / reset\n"
-      "  Shift+Z             Reset zoom to 100%\n"
-      "  Ctrl++ / Ctrl+-     Zoom in / out\n"
-     #if JUCE_MAC
-      "  Cmd+wheel, pinch    Zoom around the pointer\n"
-     #else
-      "  Ctrl+wheel          Zoom around the pointer\n"
-     #endif
-      "  Ctrl+T              Cycle color theme\n"
-     #if JUCE_MAC
-      "  Cmd+Shift+W         Toggle wireframe modules\n"
-     #else
-      "  Ctrl+W              Toggle wireframe modules\n"
-     #endif
-      "  Ctrl+I              Toggle inspector panel (left)\n"
-      "  Ctrl+Shift+I        Toggle patch browser (right)\n"
-      "  S                   Shake cables\n"
-      "  Middle-drag         Pan canvas\n"
-     #if JUCE_MAC
-      "  Cmd-drag connector  Re-route: lift the cable off that end and drop it\n"
-     #else
-      "  Ctrl-drag connector Re-route: lift the cable off that end and drop it\n"
-     #endif
-      "                      on another connector (Alt works too)\n"
-      "\n"
-      "SLOTS\n"
-      "  Ctrl+1..4           Switch to slot A..D (opens it if closed)\n"
-      "  " NME_SLOT_TOGGLE_CHORD "1..4     Show/hide slot A..D's sub-window\n"
-      "  F4 (or F11)         Focus mode: blow the focused slot up, and back\n"
-      "  Maximise button     Same, on that sub-window's title bar\n"
-      "  Ctrl+Shift+arrows   Move the focused slot to the neighbouring tile\n"
-      "                      (up/down only exist in the four-slot 2x2)\n"
-      "  Right-click slot    Show/hide that slot's sub-window\n"
-      "  Ctrl+click slot     Enable/disable without selecting\n"
-      "\n"
-      "  Open slots tile themselves: one fills the area, two split it, three\n"
-      "  go in thirds, four go 2x2. Dragging or resizing a sub-window leaves\n"
-      "  the windows where you put them; View > Slots > Tile Slots re-flows.\n"
-      "  The ABCD button (header bar, right of MUT) goes further and puts the\n"
-      "  slots back in A,B,C,D order within the tiling.\n"
-      "\n"
-      "FLOATERS\n"
-      "  Ctrl+5              Knob Floater\n"
-      "  Ctrl+6              Keyboard Floater\n"
-      "  Ctrl+7              Patch Notes\n"
-      "  Ctrl+8              Patch Mutator\n"
-      "  Ctrl+9              SysEx Monitor\n"
-      "\n"
-      "SUB-WINDOW (the one with focus)\n"
-      "  Ctrl+R / Ctrl+Shift+R  Randomize (uniform / gaussian)\n"
-      "  Ctrl+S / Ctrl+Shift+S  Save / Save as\n"
-      "  These act on that window's own slot and selection.\n"
-      "\n"
-      "PATCH MUTATOR (window focused)\n"
-      "  1-8                 Focus Mother / Children / Father\n"
-      "  O / T               Copy focused sound to Mother / Father\n"
-      "  E / U               Mutate from focused / from Mother\n"
-      "  N                   Randomize\n"
-      "  I / X               Interpolate / Cross (Mother+Father)\n"
-      "  S                   Save focused to Temporary Storage\n"
-      "  Shift+drag          Interpolate two sounds\n"
-      "  Ctrl+drag           Cross two sounds\n";
-
-  auto* editor = new juce::TextEditor();
-  editor->setMultiLine(true, false);
-  editor->setReadOnly(true);
-  editor->setScrollbarsShown(true);
-  editor->setCaretVisible(false);
-  editor->setFont(juce::Font(juce::Font::getDefaultMonospacedFontName(), 14.0f,
-                             juce::Font::plain));
-  editor->setColour(juce::TextEditor::backgroundColourId, AppTheme::palette().backgroundMain);
-  editor->setColour(juce::TextEditor::textColourId, AppTheme::palette().textPrimary);
-  editor->setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
-  editor->setText(juce::String::fromUTF8(shortcutsText));
-  editor->setSize(440, 560);
-
-  juce::DialogWindow::LaunchOptions opts;
-  opts.content.setOwned(editor);
-  opts.dialogTitle = "Keyboard Shortcuts";
-  opts.dialogBackgroundColour = AppTheme::palette().backgroundMain;
-  opts.escapeKeyTriggersCloseButton = true;
-  opts.useNativeTitleBar = false;
-  opts.resizable = false;
-  announceDialogOnSynth(opts.launchAsync());
+  // Open already: asking again closes it (the list itself lives in ui/ShortcutsDialog.cpp)
+  if (shortcutsDialog != nullptr) { shortcutsDialog->dismiss(); return; }
+  auto* dialog = ShortcutsDialog::show(this);
+  shortcutsDialog = dialog;
+  announceDialogOnSynth(dialog);
 }
 
 juce::String MainComponent::makeSynthCaption()
@@ -3956,15 +5584,15 @@ juce::String MainComponent::makeSynthCaption()
 
 bool MainComponent::canBorrowSynthDisplay() const
 {
-    if (!editorOptions.synthDisplayCaptions || !connectionManager.isConnected())
+    if (!editorOptions.synthDisplayCaptions || !synthHub.active().isConnected())
         return false;
 
     // Never squeeze in between the messages of an edit or a transfer already on
     // the wire. The display is cosmetic; the wire is not, and a patch title goes
     // out unqueued.
-    if (!connectionManager.isAckedQueueIdle()
-        || connectionManager.isFetchingPatch()
-        || connectionManager.isUploadingPatch())
+    if (!synthHub.active().isAckedQueueIdle()
+        || synthHub.active().isFetchingPatch()
+        || synthHub.active().isUploadingPatch())
         return false;
 
     return slotPatches[activeSlot] != nullptr;
@@ -3978,7 +5606,7 @@ void MainComponent::setSynthCaption()
     if (synthCaptionSlot < 0)
         synthCaptionSlot = activeSlot;
 
-    connectionManager.sendPatchTitle(synthCaptionSlot, makeSynthCaption());
+    synthHub.sendPatchTitle(synthCaptionSlot, makeSynthCaption());
 }
 
 void MainComponent::clearSynthCaption()
@@ -3993,11 +5621,11 @@ void MainComponent::clearSynthCaption()
     // doing and whatever the option now says, a borrowed name has to go back.
     // The one case with nothing to do is a synth that is no longer there, whose
     // edit buffer went with it.
-    if (!connectionManager.isConnected())
+    if (!synthHub.isConnectedSlot(slot))
         return;
 
     if (slotPatches[slot])
-        connectionManager.sendPatchTitle(slot, slotPatches[slot]->getName());
+        synthHub.sendPatchTitle(slot, slotPatches[slot]->getName());
 }
 
 void MainComponent::announceDialogOnSynth(juce::Component* dialog)
@@ -4024,11 +5652,42 @@ void MainComponent::showBetaWarning(bool forceShow)
     new BetaWarningPopup(this, appProperties);
 }
 
+// A patch arriving from the synth is swept of assignments naming a module it
+// does not have (Patch::dropDanglingAssignments). The synth keeps them, and its
+// panel keeps their lights on: the knob LEDs only follow the incremental
+// assign/deassign messages, never the patch. So whatever the sweep dropped is
+// deassigned here, or the light stays on for the rest of the session with
+// nothing in the editor that could refer to it.
+void MainComponent::clearDroppedPanelAssignments(int slot)
+{
+    if (slot < 0 || slot >= numSlots || !slotPatches[slot])
+        return;
+
+    auto& dropped = slotPatches[slot]->danglingDropped;
+    if (dropped.knobs.empty() && dropped.ctrls.empty())
+        return;
+
+    if (synthHub.isConnectedSlot(slot))
+    {
+        const int pid = synthHub.getPatchId(slot);
+        for (int knob : dropped.knobs)
+            synthHub.sendRawSysEx(slot, KnobAssignmentMessage::deassign(pid, knob, SynthHub::local(slot)));
+        for (int ctrl : dropped.ctrls)
+            synthHub.sendRawSysEx(slot, MidiCtrlAssignmentMessage::deassign(pid, ctrl, SynthHub::local(slot)));
+
+        std::cout << "[SYNC] Panel cleared of " << dropped.knobs.size()
+                  << " orphaned knob assignment(s) and " << dropped.ctrls.size()
+                  << " MIDI CC assignment(s)" << std::endl;
+    }
+
+    dropped = Patch::DroppedAssignments{};
+}
+
 void MainComponent::rebuildUndoContext(int slot)
 {
     if (!slotPatches[slot]) { slotUndoContexts[slot].reset(); return; }
     slotUndoContexts[slot] = std::make_unique<UndoContext>(UndoContext{
-        *slotPatches[slot], connectionManager, slotSynchronizers[slot],
+        *slotPatches[slot], synthHub.forSlot(slot), slotSynchronizers[slot],   // the context speaks to its own synth, in its local slot numbers
         moduleDescs,
         // An edit to this slot always redraws this slot's own canvas, whether
         // or not it is the slot the shared surfaces are bound to. Those follow
@@ -4063,22 +5722,22 @@ void MainComponent::rebuildUndoContext(int slot)
             }
         },
         [this, slot, syncGen = std::make_shared<int>(0)]() {
-            if (!connectionManager.isConnected() || !slotPatches[slot]) return;
+            if (!synthHub.isConnectedSlot(slot) || !slotPatches[slot]) return;
             int gen = ++(*syncGen);
             auto capturedGen = syncGen;
             juce::Component::SafePointer<MainComponent> safeThis(this);
             juce::Timer::callAfterDelay(80, [safeThis, capturedGen, gen, slot]() {
                 if (!safeThis || *capturedGen != gen) return;
-                if (!safeThis->connectionManager.isConnected() || !safeThis->slotPatches[slot]) return;
+                if (!safeThis->synthHub.isConnectedSlot(slot) || !safeThis->slotPatches[slot]) return;
                 if (safeThis->slotSynchronizers[slot]) safeThis->slotSynchronizers[slot]->setSuppressed(true);
-                safeThis->connectionManager.setUploadCompleteCallback([safeThis, slot]() {
+                safeThis->synthHub.setUploadCompleteCallback(slot, [safeThis, slot]() {
                     if (!safeThis) return;
-                    safeThis->connectionManager.setUploadCompleteCallback(nullptr);
+                    safeThis->synthHub.setUploadCompleteCallback(slot, nullptr);
                     if (safeThis->slotSynchronizers[slot])
                         safeThis->slotSynchronizers[slot]->setSuppressed(false);
                     safeThis->mainLayout->getStatusBar().showMessage("Patch synced to synth", 2000);
                 });
-                safeThis->connectionManager.uploadPatch(slot, *safeThis->slotPatches[slot]);
+                safeThis->synthHub.uploadPatch(slot, *safeThis->slotPatches[slot]);
             });
         },
         [this, slot](int section, int moduleId, int paramId, int value) {
@@ -4091,7 +5750,7 @@ void MainComponent::rebuildUndoContext(int slot)
         [this](int section, int containerIndex) {
             restoredModules.push_back({ section, containerIndex });
         },
-        slot
+        SynthHub::local(slot)
     });
 }
 
@@ -4338,9 +5997,9 @@ void MainComponent::applySnapshot(const ParamSnapshot& snap, const juce::String&
     // Morph knob values (protocol: section=2, module=1, param=morphIndex)
     if (currentPatch()->morphValues != snap.morphValues) {
         currentPatch()->morphValues = snap.morphValues;
-        if (connectionManager.isConnected())
+        if (synthHub.active().isConnected())
             for (int m = 0; m < 4; ++m)
-                connectionManager.queueParameter(activeSlot, 2, 1, m, snap.morphValues[static_cast<size_t>(m)]);
+                synthHub.queueParameter(activeSlot, 2, 1, m, snap.morphValues[static_cast<size_t>(m)]);
         mainLayout->getHeaderBar().repaint();
         refreshKnobFloater();
     }
@@ -4366,6 +6025,47 @@ void MainComponent::setMorphEndpoint(bool isB, int snapIndex) {
     refreshMorphUi();
     mainLayout->getStatusBar().showMessage(
         juce::String("Morph ") + (isB ? "B" : "A") + " set from " + sourceName, 2000);
+}
+
+bool MainComponent::setSlotMorphValue(int slot, int group, int value, juce::String& error) {
+    if (slot < 0 || slot >= numSlots || !slotPatches[slot]) {
+        error = "No patch loaded in slot " + juce::String(slot);
+        return false;
+    }
+    if (group < 0 || group > 3) {
+        error = "morph group must be 0-3";
+        return false;
+    }
+    // What the header bar does when its dial is dragged: write the patch, send
+    // the value as a parameter of the morph section, and move every knob cell
+    // that shows it (issue #64). No undo step, exactly like the dial.
+    const int clamped = juce::jlimit(0, 127, value);
+    slotPatches[slot]->morphValues[static_cast<size_t>(group)] = clamped;
+    synthHub.sendParameter(slot, 2, 1, group, clamped);
+    if (slot == activeSlot)
+        mainLayout->getHeaderBar().repaint();
+    refreshKnobFloater();
+    return true;
+}
+
+bool MainComponent::playNoteOnSynth(int note, int durationMs, juce::String& error) {
+    if (!synthHub.active().isConnected()) {
+        error = "No synth connected";
+        return false;
+    }
+    if (note < 0 || note > 127) {
+        error = "note must be 0-127";
+        return false;
+    }
+    // Same message as the keyboard floater. The G1 plays it on the slot it has
+    // focused, and the protocol carries no velocity.
+    synthHub.active().sendNoteOn(note, 100);
+    juce::Component::SafePointer<MainComponent> safeThis(this);
+    juce::Timer::callAfterDelay(juce::jlimit(10, 10000, durationMs), [safeThis, note]() {
+        if (safeThis != nullptr)
+            safeThis->synthHub.active().sendNoteOff(note);
+    });
+    return true;
 }
 
 void MainComponent::assignMorphKnob(int knobIndex) {
@@ -4439,7 +6139,7 @@ void MainComponent::applyMorphPosition(float t) {
         if (!param || param->isLocked()) continue;
         if (param->getValue() == v) continue;
         param->setValue(v);
-        connectionManager.queueParameter(activeSlot, p.section, p.moduleId, p.paramId, v);
+        synthHub.queueParameter(activeSlot, p.section, p.moduleId, p.paramId, v);
     }
 
     // Morph knob values (protocol: section=2, module=1, param=morphIndex)
@@ -4453,8 +6153,8 @@ void MainComponent::applyMorphPosition(float t) {
         int v = juce::roundToInt(av + (bv - av) * t);
         if (currentPatch()->morphValues[static_cast<size_t>(m)] != v) {
             currentPatch()->morphValues[static_cast<size_t>(m)] = v;
-            if (connectionManager.isConnected())
-                connectionManager.queueParameter(activeSlot, 2, 1, m, v);
+            if (synthHub.active().isConnected())
+                synthHub.queueParameter(activeSlot, 2, 1, m, v);
         }
     }
 
@@ -4666,7 +6366,7 @@ void MainComponent::onInterpolationTick() {
         int oldVal = param->getValue();
         param->setValue(interpolatedVal);
         if (oldVal != interpolatedVal)
-            connectionManager.queueParameter(activeSlot, f.section, f.moduleId, f.paramId, interpolatedVal);
+            synthHub.queueParameter(activeSlot, f.section, f.moduleId, f.paramId, interpolatedVal);
     }
 
     canvasFor(activeSlot).repaintCanvas();
@@ -4689,9 +6389,9 @@ void MainComponent::onInterpolationTick() {
         // Morph knob values land at the end (protocol: section=2, module=1)
         if (currentPatch() && currentPatch()->morphValues != interpolation.targetMorphs) {
             currentPatch()->morphValues = interpolation.targetMorphs;
-            if (connectionManager.isConnected())
+            if (synthHub.active().isConnected())
                 for (int m = 0; m < 4; ++m)
-                    connectionManager.queueParameter(activeSlot, 2, 1, m,
+                    synthHub.queueParameter(activeSlot, 2, 1, m,
                         interpolation.targetMorphs[static_cast<size_t>(m)]);
             mainLayout->getHeaderBar().repaint();
         }
@@ -4699,7 +6399,7 @@ void MainComponent::onInterpolationTick() {
         // Queue all final values so the synth lands exactly on the target sound.
         for (size_t i = 0; i < interpolation.to.size(); ++i) {
             auto& e = interpolation.to[i];
-            connectionManager.queueParameter(activeSlot, e.section, e.moduleId, e.paramId, e.value);
+            synthHub.queueParameter(activeSlot, e.section, e.moduleId, e.paramId, e.value);
         }
 
         mainLayout->getStatusBar().showMessage(
@@ -4777,11 +6477,15 @@ void MainComponent::randomizeSlotParameters(int slot, PatchCanvasComponent& canv
   for (auto& [mod, sec] : selected)
       selectedSet.insert(mod);
   bool hasSelection = !selectedSet.empty();
+  // Modules excluded from mutation are left alone here too: the manual always
+  // said so, but only the Mutator and the MCP bridge actually checked.
+  int excludedSkipped = 0;
 
   auto processContainer = [&](ModuleContainer& container, int section) {
       for (auto& modPtr : container.getModules()) {
           if (!modPtr) continue;
           if (hasSelection && selectedSet.count(modPtr.get()) == 0) continue;
+          if (modPtr->isExcludedFromMutation()) { ++excludedSkipped; continue; }
           for (auto& param : modPtr->getParameters()) {
               if (shouldExclude(param)) continue;
               auto* pd = param.getDescriptor();
@@ -4812,7 +6516,13 @@ void MainComponent::randomizeSlotParameters(int slot, PatchCanvasComponent& canv
   processContainer(p->getPolyVoiceArea(), 1);
   processContainer(p->getCommonArea(), 0);
 
-  if (changes.empty()) return;
+  if (changes.empty()) {
+    if (excludedSkipped > 0)
+      mainLayout->getStatusBar().showMessage(
+          "Nothing randomized: " + juce::String(excludedSkipped)
+          + (excludedSkipped == 1 ? " module is" : " modules are") + " excluded from randomization", 3000);
+    return;
+  }
 
   // Single undo transaction with batched synth upload. The RandomizeAction runs
   // against this slot's UndoContext, whose repaint callback already redraws
@@ -4824,10 +6534,35 @@ void MainComponent::randomizeSlotParameters(int slot, PatchCanvasComponent& canv
   juce::String scope = hasSelection ? " (selection)" : " (all)";
   mainLayout->getStatusBar().showMessage(
       "Randomized " + juce::String(numChanges) + " parameters" + scope
-      + (gaussian ? " (Gaussian)" : " (Simple)"), 3000);
+      + (gaussian ? " (Gaussian)" : " (Simple)")
+      + (excludedSkipped > 0 ? " - " + juce::String(excludedSkipped)
+                                   + (excludedSkipped == 1 ? " excluded module" : " excluded modules")
+                                   + " left alone"
+                             : juce::String()), 3000);
+}
+
+// What the slots add up to, as a fraction of one DSP (module cycles are percentages);
+// negative when no slot holds a patch.
+float MainComponent::synthDspLoad(int synth) const {
+  double total = 0.0;
+  bool any = false;
+  for (int l = 0; l < kSlotsPerSynth; ++l) {
+    const int s = SynthSlot::global(synth, l);
+    if (!slotPatches[s])
+      continue;
+    any = true;
+    for (auto* area : {&slotPatches[s]->getPolyVoiceArea(), &slotPatches[s]->getCommonArea()})
+      for (auto& mod : area->getModules())
+        if (mod && mod->getDescriptor())
+          total += mod->getDescriptor()->cycles;
+  }
+  return any ? static_cast<float>(total / 100.0) : -1.0f;
 }
 
 void MainComponent::updateDspLoadDisplay() {
+  for (int synth = 0; synth < kMaxSynths; ++synth)
+    mainLayout->getSlotBar().setLoad(synth, synthDspLoad(synth));
+
   if (currentPatch() == nullptr) {
     mainLayout->getHeaderBar().setLoadValues(-1.0f, -1.0f);
     return;

@@ -1,8 +1,1678 @@
 # Changelog
 
-## Unreleased
+## 0.24.0 — 2026-10-27
+
+NME installs an OS into a G1 (Device > Update Synth OS), on a real G1 or on G1-Emu, and knows a
+Micro Modular, which it shows with its one slot.
 
 ### Fixed
+
+- **Update Synth OS refuses an image the G1 cannot take** (2026-10-26): at most 393,184 bytes, not
+  458,716. The G1's update utility erases only the flash's first six sectors, so a longer image is
+  written over the seventh unerased: it worked once on a real G1 and then failed with "Write Error"
+  (G1-Mods' NOTES.md, "The first real G1"). Checked: `test_os_update.cpp` (the largest image that
+  fits, and one long word more refused); the same update installed OS images on a real G1 that day,
+  Clavia's 3.03b among them.
+
+### Added
+
+- **A Micro Modular shows one slot** (2026-10-26). With a Micro connected its row in
+  the slot bar has one button (A), the Slot menu lists only A, and the others cannot be opened, focused or
+  toggled from the keyboard: `ConnectionManager::slotCount()`, `SlotBar::setSlotCount`,
+  `MainComponent::slotExists`. The slot windows the synth asks for are limited to that one. The Slot-select
+  dialog still shows four buttons. Checked: the whole Release build compiles and NME connects to G1-Emu's
+  Micro model ("Connected: Nord Micro Modular v3.3"); Javier confirmed the one-slot bar.
+
+- **NME knows when the synth is a Micro Modular** (2026-10-26). The device
+  byte of a synth's IAm (0 keyboard, 1 rack, 2 Micro, from `docs/RESEARCH.md`) is now read:
+  `IAmMessage::model()`, `ConnectionManager::Status::synthModel` and `isMicroModular()`. The connection
+  line says "Connected: Nord Micro Modular v3.3" and the MCP `get_synth_status` gives `synthModel`
+  (`rack`, `micro`, `keyboard`). Written for G1-Emu's new Micro model (its OS answers `02`). Checked: the new
+  `test_synth_model.cpp` (the rack's and the Micro's real payloads, 7 assertions) passes, the whole
+  Release build compiles, and NME connected to G1-Emu's Micro model, loaded a patch and played it (Javier).
+
+- **Device > Update Synth OS** (2026-10-25, branch `os-update`). Installs an OS image into a G1's flash
+  over MIDI, as Clavia's OS updater does, on a real G1 or on G1-Emu. Laid out like Editor Options:
+  **Warning** (the risk, plainly: it opens there, and Install waits for its box to be ticked), **Install
+  OS** (the image, the synth it goes to, the speed, the transfer), **Update mode** (how a G1 or G1-Emu
+  gets ready) and **Recovery** (the ways back). The synth list offers every port NME has open with its
+  state, and picks the one in update mode, so with a G1 and G1-Emu both there the OS goes only where it
+  is awaited. The format (`source/midi/OsUpdate.*`) was read from the G1's boot ROM and checked against a
+  capture of Clavia's 3.03b updater: the same messages byte for byte but the last one's padding. A synth
+  in its update mode (its IAm carries 7F) is no longer taken for a connected one: the status bar says so
+  and the opening sequence does not start. Nothing of Clavia's comes with NME: the user brings the image.
+  Checked: `nme_tests` (201, with `test_os_update.cpp` and a new connection case); the C++ stream against
+  the updater's capture (3,439 of 3,440 messages identical, the last differing only in padding); and by
+  Javier with G1-Emu in update mode on its direct link, a G1 on a UM-ONE also open: the OS went to
+  G1-Emu only, its checksum was answered right, Store, Update completed, and G1-Emu booted it.
+
+## 0.23.0 — 2026-10-24
+
+The new look. The whole interface is redrawn in a flat, dark style with one amber accent: the header
+bar, the module bar, the inspector, both browsers, every menu, every dialog and floater, and a status bar
+with the inspector, browser, MIDI and options buttons. Underneath: the plugin keeps its patches in the
+DAW project (#94), a UI size option for 4K screens (#105), banks that go straight to the synth's memory,
+a Mutator that mutates like the G2's, and a handful of fixes reported by email and by issue. The
+entries below are in the order they were made, newest first; the redesign ones say "branch
+`ui-redesign`", which was merged into `main` on 2026-10-24.
+
+### Changed
+
+- **Snapshot run beside a running editor** (2026-10-24, branch `ui-redesign`). The editor allows one
+  instance only, so a picture-taking run (`NME_SNAPSHOT_DIR`) started while you had NME open handed over
+  to yours and quit without a picture. That run now counts as its own instance.
+
+- **Keyboard Shortcuts, like Editor Options** (2026-10-24, `main`). The window was a plain block of
+  monospaced text. It is now 880x640 with the groups (File, Edit, Canvas, Slots, Floaters, Sub-window,
+  Mutator) in a list at the left, the action at the left of each row and its keys as key caps at the right,
+  and a **filter** on top that searches the action and the keys of every group at once (grouped under
+  the name of each group that matches). It toggles like the other dialogs: asking again closes it. The list is
+  data in `ui/ShortcutsDialog.cpp`, and Ctrl+M (MIDI setup) is in it.
+
+- **Patch name field without the outline** (2026-10-24, `main`). The grey line round the name field is
+  gone: only the darker ground says it is a field (a touch darker still), in the resting state and
+  while typing.
+
+- **Header bar: the patch name is a field, and the elements sit closer** (2026-10-24, `main`). The name
+  was bare text, with nothing to say it can be edited: it is in a field now (the input colour, darker than
+  the bar, with a thin border and 11px of room), 150px wide (it was 168), and the editor that replaces it
+  while typing has the same size and margin. The most the gaps between groups can grow is 30px (it was
+  48), so the voices and everything after them sit nearer the name and further left on a wide window.
+
+- **Tabs: the word centred in its box, and a hairline between tabs** (2026-10-24, branch `ui-redesign`).
+  The titles of the tabs (Synth, Disk of the browser) rode high above the underline: they sit in the
+  middle of the room above it now, and a thin rule between one tab and the next tells them apart.
+
+- **Alert windows: a small icon instead of JUCE's triangle** (2026-10-24, branch `ui-redesign`). The
+  default warning mark is a huge red triangle that the window clips. A ring with a mark in it (! warning,
+  ? question, i info) in the theme's accent replaces it, and the window has a thin outline.
+
+- **The first-start Beta warning, the shortcuts window and the alert windows** (2026-10-24, branch
+  `ui-redesign`). Found by opening the menus and a fresh start for the final review. The Beta warning
+  that a clean install shows still wore the old look (gold title, boxed x, a tiny line under it): it is now a
+  540x468 dialog with Editor Options' title bar and footer, the text in 14px with room round it, and the
+  button filled with the accent. The Keyboard Shortcuts window keeps its text 20px from the edge. And the
+  alert windows (delete a patch, rename...) have a size more of type and 36px buttons.
+
+- **A/B crossfade: bigger, between the snapshots and the Mutator, resting in the middle**
+  (2026-10-24, branch `ui-redesign`). It moves to the right of the eight snapshots and the left of
+  MUTATOR; it is 150px wide (it was 104) and 26px tall, with 28px of room at each end for its letters (13px
+  bold), a 5px track and a 10x20 thumb. While there is no A and B captured, the thumb sits in the middle
+  instead of hard against the A; the value behind it is untouched.
+
+- **Snapshot run: a patch and every options page** (2026-10-24, branch `ui-redesign`). With
+  `NME_SNAPSHOT_PATCH=<file.pch>` the picture-taking run opens that patch first, and Editor Options is
+  pictured page by page (22 images in all). The A/B crossfade keeps 20px at each end for its letters, in
+  the drawing and in the hit test alike (they differed: 14 and 11).
+
+- **Header bar: nothing runs under the heart at 1280px** (2026-10-24, branch `ui-redesign`). Found in the
+  final review with the snapshots. With the bigger macro dials the bar no longer fitted a 1280px window,
+  and the crossfader ran under the heart and Patreon buttons. The patch name now gives way last (down to
+  104px) and the dials are 8px apart again, so it fits.
+
+- **The A/B crossfade, as in the mockup** (2026-10-24, branch `ui-redesign`). The boxed fader with a
+  thin bar becomes an "A" and a "B" at the ends of a slim track filled in the accent up to a tall rounded
+  thumb. The old box border that said "armed to learn" or "already on a knob" is a ring round the thumb now
+  (yellow while armed, accent once assigned). Same hit area and behaviour.
+
+- **Module bar: a rule under the categories and room round ABCD** (2026-10-24, branch `ui-redesign`).
+  A horizontal rule runs between the row of categories (In/Out, Osc, LFO...) and the row of module chips,
+  and the ABCD button has 16px more room before the chips (the column is 74px, it was 58), with its
+  hairline in the middle of the gap, as in the mockup.
+
+- **Status bar: hairlines and the link text against the buttons** (2026-10-24, branch `ui-redesign`).
+  A thin vertical rule after the "i" of the inspector, as in Bitwig, and another between the text on the
+  right ("Real G1 (UM-ONE MIDI 1)") and the lens. The text is now as wide as it needs and sits against
+  the buttons: the hidden Voices and DSP labels used to keep 200px free in between, which left it
+  floating in the middle.
+
+- **One window each: asking again closes it** (2026-10-24, branch `ui-redesign`). Pressing the MIDI
+  button (or Ctrl+M) several times opened one MIDI Setup after another, and so did the other dialogs.
+  MIDI Setup, Editor Options, Patch Settings and Synth Settings now toggle: the second press closes the
+  window that is open (Editor Options puts the cable opacity back, as Cancel does). About is modal, so
+  it cannot be asked twice; Slot Select and the location and set dialogs belong to an action in progress
+  and are left as they were.
+
+- **MIDI and Options buttons in the status bar** (2026-10-24, branch `ui-redesign`). At the right of the
+  status bar, after the lens of the browser, a little **keyboard** opens MIDI Setup and a **cogwheel**
+  opens Editor Options: lens, keyboard, cogwheel. Same dialogs as Ctrl+M and Ctrl+, and the menus;
+  their tooltips say so.
+
+- **Fold arrows the right way round** (2026-10-24, branch `ui-redesign`). The banks of the patch browser
+  and the inspector's sections pointed up while folded and down while open. They now point down when
+  folded (open me) and up when open (fold me away).
+
+- **Inspector and browser switches as icons in the status bar** (2026-10-24, branch `ui-redesign`).
+  The two thin strips with a chevron at the edges of the window, which were hard to read as buttons, are
+  gone. As in Bitwig, an **"i"** at the left of the status bar opens and closes the inspector and a
+  **magnifying glass** at the right does the same for the patch browser; each lights in the accent while
+  its panel is open and has a tooltip with its shortcut. The status bar is 30px tall (it was 24) and the
+  canvas gets the 14px at each edge back. Ctrl+I and Ctrl+Shift+I are unchanged.
+
+- **The menu bar, restyled** (2026-10-24, branch `ui-redesign`). 32px tall (it was 24) in the ground
+  colour with a rule under it; each title (File, Edit, View, Device, Help, About) is a 14px pill that
+  lights up under the mouse and stays lit while its menu is open, with 14px of room either side. The red
+  dot that flags something new in a menu sits after its title as before.
+
+- **Round radios, legible In/Out, air in the options rows** (2026-10-24, branch `ui-redesign`). Found
+  with the snapshots. A toggle that belongs to a group (only one can be on) now draws as a round radio
+  in every dialog (Octave, Pedal, Portamento, Clock...) while a lone one stays a checkbox; the In and
+  Out captions of MIDI Setup are 13px bold in the normal text colour instead of nearly invisible; and the
+  Editor Options rows are 74px tall with the description pushed down so its second line no longer
+  touches the rule under it.
+
+- **Developer aid: the editor can picture itself** (2026-10-24, branch `ui-redesign`). With
+  `NME_SNAPSHOT_DIR=<folder>` set, three and a half seconds after start NME saves PNGs of the window, the
+  header bar (3x), the five floaters and eight dialogs (About, Editor Options, MIDI Setup, Patch Settings,
+  Synth Settings, Patch Location, Save Slot Set, Slot Select), and quits. JUCE draws them offscreen, so nothing on the desktop
+  is captured, Wayland included. Meant for checking a restyle without a screen grab; with a throwaway
+  `HOME`, so the real settings are not touched.
+
+- **The four macro knobs of the header bar, redrawn** (2026-10-24, branch `ui-redesign`). They were flat
+  coloured discs with a thick outline that looked pixelated at 24px. They are now 32px dials: a track, the
+  value as an arc in the macro's colour (red, green, blue, yellow) with round ends, a dark face and a
+  light pointer. Hit tests and spacing follow the new size.
+
+- **Knob Floater: the flat knob, as in the modules** (2026-10-24, branch `ui-redesign`). The knob was not
+  the one the modules wear (the dark disc with a rim, a pointer and the value arc in the theme's blue):
+  the floater now draws that very one (`skeuo::drawFlatKnob`) in the canvas theme's colours, with the arc
+  growing from the centre on bipolar ranges and the ticks at 7 and 5 o'clock. It follows the theme when
+  it changes.
+
+- **Knob Floater: the modules' own knob** (2026-10-24, branch `ui-redesign`). The arc knob is swapped for
+  the knob the modules wear on the canvas (a plain circle, a grip line, a tick at each end of its
+  travel), the same the Mutator uses. The labels, the formatted value and "Free" stay as they were.
+
+- **Knob Floater, like the mockup** (2026-10-24, branch `ui-redesign`). Each cell reads from the top:
+  the module's name (small, muted), the parameter's name (bold), an **arc knob** (dark track, the value
+  in the accent, a white pointer; it replaces the old filled blob) and the value as the parameter
+  formats it (C4, 340 ms, -6 dB) in a monospaced line. An empty knob says "Free" (its number where the
+  module's name goes) with a dimmed knob and a dash; the assignment lamp is gone, since the colour of the
+  arc says it already.
+
+- **Knob Floater restyled** (2026-10-24, branch `ui-redesign`). Bigger cells (112x86) and knobs (46px),
+  18px margins and 22px between the three groups, module names and parameter names in 12px (the
+  parameter in bold), and the lamp and knob number moved with them.
+
+- **Keyboard Floater restyled** (2026-10-24, branch `ui-redesign`). 760x202, 16px margins, 32px controls
+  with a rule under them, bolder Rate and Gate captions, and Drone and Repeat show as an accent fill
+  when on.
+
+- **Patch Notes and SysEx Monitor restyled** (2026-10-24, branch `ui-redesign`). 16px margins instead of
+  6-8, text with room from the edge of its field (indents), the notes field in the input colour with the
+  accent when focused; the monitor's toolbar is 34px with bigger buttons and a rule under it, and the log
+  in 13px.
+
+- **Mutator: the separator dot in the section titles** (2026-10-24, branch `ui-redesign`). It was read as
+  Latin-1 and showed as "A" with a stray mark; the titles are read as UTF-8.
+
+- **Patch Mutator restyled** (2026-10-24, branch `ui-redesign`). Same controls and keys, new layout: more
+  air (24px margins, 10px gaps), a rule between sections, muted section titles, rounder sound boxes with
+  Mother and Father named in the accent, bigger knob captions, **Mutate** filled with the accent first in
+  the row of operations and Mother = Patch at its right end. The panel measures its own height now
+  (`layoutAll`), so it is no longer a fixed number.
+
+- **Slot Select: no rule under "Local"** (2026-10-24, branch `ui-redesign`). The footer already draws one:
+  the last row leaves its own out (`OptionRow::setShowRule`) and the dialog is shorter again.
+
+- **Slot Select: room under "Local"** (2026-10-24, branch `ui-redesign`). The last row's text sat on its
+  own rule and that rule on the footer's: the row is taller and there is a gap before the footer.
+
+- **Synth Settings redesigned** (2026-10-24, branch `ui-redesign`). 720x640: the same controls (name and
+  master tune, MIDI channels, velocity scale and switches, clock, knob, pedal and keyboard behaviour) on
+  34px rows with bigger type, muted section titles and rules between sections, and Editor Options' title
+  bar and footer with Cancel and **OK** (filled with the accent).
+
+- **Patch Settings redesigned** (2026-10-24, branch `ui-redesign`). 620x572: the same controls (voices,
+  velocity and keyboard ranges, pedal and bend, portamento, octave and retrigger) with much more air, 34px
+  rows, bigger type, muted section titles, a rule between sections and Editor Options' title bar and
+  footer with Cancel and **OK** (filled with the accent).
+
+- **Ctrl+T works whatever has the keyboard, and the progress bars are thicker** (2026-10-24, branch
+  `ui-redesign`). A menu that is open, or a dialog, swallowed the key press, so Ctrl+T did nothing: a
+  light timer now watches the keyboard and cycles the theme then too (only when no window took the press
+  a moment before, so it never fires twice). The progress bars (the bank transfer ones) were a thin
+  strip with a tiny percentage: they are 26px tall, rounded, with the fill in the accent and the
+  percentage in 13px bold.
+
+- **Bank Transfer redesigned** (2026-10-24, branch `ui-redesign`). Save Bank to Disk, Backup All Banks and
+  Send Bank to Synth: 520x440, muted section labels, taller fields with larger type, a thinner progress
+  bar, Editor Options' title bar and a footer band with Cancel and **Start** (filled with the accent).
+
+- **Patch Location redesigned** (2026-10-24, branch `ui-redesign`). The dialog that asks where a patch goes
+  (Slot, Bank, Position): 440px wide, muted section labels over taller lists, Editor Options' title bar
+  and a footer band with Cancel and **OK** (filled with the accent).
+
+- **Save Slot Set redesigned** (2026-10-24, branch `ui-redesign`). 520x480: the set's name over a full-width
+  field, the four slots as rows with a rule between and their mode list at the right, the notes field below
+  and the footer band with Cancel and **Save** (filled with the accent). Same rules as before for when
+  Save is enabled.
+
+- **Slot Select redesigned** (2026-10-24, branch `ui-redesign`). The dialog that asks which slot to open a
+  patch into: the four slots and the "Local" choice (a name and a line saying it is editor-only) are
+  rows with a round radio at the right, the title bar is Editor Options' and the footer band has Cancel and
+  **OK** (filled with the accent). The OptionRow control moves to its own header (`OptionRow.h`) so
+  the dialogs can share it, and `AppTheme::drawDialogChrome` draws the title bar and footer common to them.
+
+- **MIDI Setup redesigned** (2026-10-24, branch `ui-redesign`). The framed groups become **one card per
+  port** (640px wide): its number and name, the connection status in words with a dot (green when
+  connected) and the **switch** that enables it, and below it the In and Out ports, one under the other,
+  each a full-width list. The title bar is Editor Options' (40px, bold title, rule), and the buttons sit
+  at the right of a footer band: Apply, **OK** (filled with the accent) and Cancel. The same ports,
+  statuses, retries and Apply/OK/Cancel as before; only the layout is new.
+
+- **Renaming the patch in the header, and every window's title bar** (2026-10-24, branch `ui-redesign`).
+  After a rename the name label stayed on screen as a boxed field instead of the bar going back to its
+  flat title: it is hidden when the editing ends, and the editor is typed in the title's own size and
+  bold. And the windows JUCE draws (the floaters, the browser window, About) had its default grey title
+  bar with a red cross: they now wear the dialogs' own, the ground colour, the title bold at the left, a
+  rule under it, and the same gold cross.
+
+- **About restyled** (2026-10-24, branch `ui-redesign`). 520x620, a bigger icon, title (25), the subtitle
+  in the accent and the version in a quiet line; the credits list in a clean field with breathing room;
+  and a footer band with the buttons in two rows: **Donate** (filled with the accent) and **Patreon** on
+  top, **Website**, **GitHub** and **Copy version** below.
+
+- **The other dialogs: no stray window drag, and readable text fields** (2026-10-24, branch
+  `ui-redesign`). MIDI Setup, Bank Transfer, Patch Location, Patch Settings and Synth Settings dragged
+  the window on any mouse movement with the anchor of the last title-bar drag, the same fault as Editor
+  Options had: they now drag only when the press began on the title bar (the press position tells).
+  The name field of Synth Settings and the name and notes fields of Save Slot Set use size 14, centred
+  in the field.
+
+- **Editor Options: the window no longer moves by itself, and its text fields read better**
+  (2026-10-24, branch `ui-redesign`). Picking a page in the sidebar could carry the whole dialog across
+  the screen: `mouseDrag` dragged the window on any movement, with the anchor of the last time the
+  title bar was dragged. Now only a press that starts on the title bar drags. The library path and the
+  MCP command fields use size 14 with the text centred in the field (it sat small at the top).
+
+- **Every window wears a thin outline** (2026-10-24, branch `ui-redesign`). A dialog or a floater on
+  the same dark ground as what is behind it melted into it. The dialogs (Editor Options, About, MIDI
+  Setup, Bank Transfer, Patch and Synth Settings, Patch Location, Save Slot Set, Slot Select) draw a 1px
+  frame over everything they hold, and the windows JUCE draws itself (the floaters, the browser window,
+  the About box) get it from the look and feel's window border. The line is the theme's border colour,
+  lightened.
+
+- **Editor Options redesigned** (2026-10-24, branch `ui-redesign`). The one long list becomes a dialog
+  (860x640) with a **sidebar of eight pages**: Appearance (theme, UI size, hardware look, knob style,
+  flat knobs, wireframe), Cables (style, opacity), Knobs (drag mode), Behaviour (ask slot, animate
+  tiling, reopen windows, note names), Synth link (auto upload, synth display, send speed), Library,
+  Updates (community themes, new version) and Advanced (MCP bridge). Each setting is a row with its name and
+  a line saying what it does, instead of a tooltip; the check boxes become **switches** and the
+  one-among-several choices **round radios**. The page's name is a heading, and the dialog does not
+  change size when a page is picked. The settings, their saving and Cancel (which puts the cable
+  opacity back) work as before; only the layout is new. Not looked at on screen yet.
+
+- **Menus: the section heading is no longer stretched, and the check column is narrower**
+  (2026-10-24, branch `ui-redesign`). The 32px minimum row height applied to a menu's section heading
+  as well (the "value" over a parameter's right-click menu), which JUCE then enlarges by half again, so
+  it had a big gap above it. The heading keeps its natural height now and is drawn level with the
+  words, and the column reserved on the left for the check marks is 20px (was 24+).
+
+- **Menus on Linux are one clean rectangle** (2026-10-24, branch `ui-redesign`). JUCE can only give a
+  window see-through corners on Linux when it is built with `JUCE_USE_XRENDER`, which this build is
+  not, so a rounded box showed square dark corners behind it (most visible on the right-click menus).
+  Where the window cannot be transparent the menu is now a plain rectangle in the panel colour with a
+  thin border and its rows rounded inside it; where it can (macOS, Windows) the rounded box still
+  floats with its margin.
+
+- **Menus: the highlight is clear of the box's edge** (2026-10-24, branch `ui-redesign`): 6px of room
+  between the highlighted row and the rounded box on each side (it was 2), and the words 10px inside the
+  highlight; the menus are a little wider for it.
+
+- **Menus: the highlighted row stays inside the box** (2026-10-24, branch `ui-redesign`): the rows are
+  given the whole width of the window, margin included, so the highlight stuck out of the rounded box
+  by the margin on each side; the rows are now drawn 6px in.
+
+- **Menus float a little away from the menu bar** (2026-10-24, branch `ui-redesign`): the rounded box
+  is drawn 6px inside the menu window, so there is a gap between it and the bar (and a margin on every
+  side) instead of touching it.
+
+- **Menus restyled** (2026-10-24, branch `ui-redesign`). Every drop-down and context menu (File, Edit, View,
+  Device, the right-click menus, the Cables menu) gets rounded corners and a thin border, 6px of
+  padding, 32px rows, a rounded highlight under the pointer, a hairline for a separator, a check
+  mark in the accent for what is on, a chevron for a sub-menu and the shortcut at the right, quiet
+  and in monospaced type. The menu bar itself (File, Edit... along the top) is unchanged for now.
+
+- **Disk list: it appears at once, from one scan, in a third of the time** (2026-10-24, branch
+  `ui-redesign`). The first background version showed an empty list with "Hide 2.10" on: two scans
+  started (the panel was asked for the same folder twice) and each opened all 53,759 files before
+  showing anything. Now the scan reads only names, so the list shows as soon as it is read; which
+  patches are old is found out afterwards, in the background, and only then are they hidden. The
+  same folder asked for again while it is being read is ignored. And the tree is walked with
+  `std::filesystem`, which reads each entry's type from the directory listing, where the JUCE
+  iterator asks about every file: 3.2s instead of 10.5s on the real library (53,797 patches).
+  While it reads, the status line says "Reading the library...".
+
+- **The Disk list is read on a background thread** (2026-10-24, branch `ui-redesign`). With a library
+  of tens of thousands of patches (53,759 here) the editor froze at startup and on Refresh: the
+  recursive scan ran on the message thread and, with "Hide 2.10" on (which is now remembered, and made
+  this much worse), every patch file was opened to tell an old one from a modern one. Now the scan, and
+  that check, run on a background thread; the status line says "Reading the library..." and the list
+  appears when it is ready. A scan overtaken by a newer one (Refresh again, another folder) is dropped.
+  Switching "Hide 2.10" on later does the check in the background too, and the list is rebuilt when
+  it is known. Nothing is hidden until then.
+
+- **Browser tabs: more room under the words** (2026-10-24, branch `ui-redesign`). The "Synth" and "Disk"
+  titles were touching the rule below them. The tab bar is 40px (was 28) and the word is lifted so
+  there is air between it and the underline.
+
+- **Disk tab: hairlines between the search and filters, the count row and the list** (2026-10-24,
+  branch `ui-redesign`), edge to edge like the rules of the inspector and of the Synth banks; and
+  "Hide 2.10" gets enough room to read in full (it was cut to "Hide 2....").
+
+- **The browsers remember "Hide empty" and "Hide 2.10"** (2026-10-24, branch `ui-redesign`). Both
+  switches went back to off every time the editor was opened. They are now saved in the editor's
+  settings (`browserHideEmpty`, `browserHidePch2`) and set again at startup.
+
+- **Synth tab: the banks as section headings** (2026-10-24, branch `ui-redesign`). Each bank is drawn
+  like the inspector's sections: a rule above it, its name in small capitals ("BANK 1", the 101-199
+  range is gone), and the fold mark at the right edge (up when folded, down when open). The tree draws
+  no open/close button of its own, so the patches sit right under their bank; a click anywhere on the
+  bank's row folds or unfolds it, as before.
+
+- **Synth tab: patch locations as pills, and the list closer to the left** (2026-10-24, branch
+  `ui-redesign`). Each patch shows its location (101, 102...) as a pill in the style of the Disk
+  list's type tags, blue for a patch, muted for an empty slot and in the accent for the one loaded
+  in the slot, with the name after it, both centred in a 32px row. The tree's indentation drops to
+  14px (room for the chevron only), so the patches sit close to their bank instead of far to the right.
+
+- **Browser search fields: the text is centred and bigger** (2026-10-24, branch `ui-redesign`). The
+  typed text and the hint sat at the top of the field in a small size; both search fields (Disk and
+  Synth) now centre it vertically and use size 15.
+
+- **Browser: more room, and the Synth tab redone** (2026-10-24, branch `ui-redesign`). Both tabs have
+  12px margins and 10px between the search, the chips and the list, instead of a squeeze. **Disk:** the
+  chips are as wide as their word and sit side by side from the left, no longer stretched across the
+  panel; the count row says "N files" (or "N of M" when filtered), with Hide 2.10 and the two arrows on
+  its right; 32px rows. **Synth:** a bank is its name in bold with its range ("101 - 199") quietly on the
+  right, the open/close mark is a chevron (the app-wide tree look), each patch is its location in a
+  muted mono number and then its name, rows are 30px (banks 36px), and the Hide empty check box and
+  the Refresh button share one row. **App-wide:** check boxes are rounded and fill with the accent when on.
+
+- **Browser (right panel) restyled** (2026-10-24, branch `ui-redesign`). The **Synth / Disk tabs** are
+  flat now: just the word, with an underline in the accent under the front one (`AppLookAndFeel`).
+  **Text fields app-wide get rounded corners** (6px, the focus ring too), so the search fields, the
+  dialogs and the inspector's editors match the buttons. **Disk tab:** no "Search" label (the field's
+  hint says it), a taller search row with a rounded refresh button, the filter chips (All, Patch, Snip,
+  Bank, Set) as pills with the chosen one filled in the accent, 30px rows with no hairline between them,
+  the selected one a raised rounded row, and the type tag (PATCH, SNIP, BANK, SET) a pill. **Synth tab:**
+  the same search field, and the selected and the loaded patch as rounded rows (the loaded one tinted
+  with the accent) instead of a boxed outline.
+
+- **Inspector: no hairline under the last assignment of a section** (2026-10-24, branch
+  `ui-redesign`): the next section's title already draws its own rule, so two lines in a row read as noise.
+
+- **Inspector: with a module selected, only its own knobs, MIDI CC and macros** (2026-10-24,
+  branch `ui-redesign`). The Knobs, MIDI CC and Macros sections listed the whole patch whichever module
+  was selected. Now, with a module selected they show that module's assignments only; with none
+  selected, all of the patch's, as before. A section left empty by that is not drawn.
+
+- **Inspector: assignment rows as in the mockup** (2026-10-24, branch `ui-redesign`). Macros,
+  knobs and MIDI CC share one look, told apart by their icon: an arch in the macro's colour, a knob
+  glyph, a "CC" pill. Each row reads "parameter -> target" with a drawn arrow (e.g. "Coarse -> Macro 1",
+  "Res -> Knob 3", "Freq -> CC 74"), the module it belongs to in small type under it, a hairline between
+  rows (40px high) and the cross at the right edge, with the macro's amount bar just left of it. The
+  coloured band per macro is gone: the icon colour and the target say which one it is. The cross and
+  the amount bar keep working; only their place moved.
+
+- **Inspector: new order, and what is empty is hidden** (2026-10-24, branch `ui-redesign`). From
+  the top: the knob panel, the **Module** block, its **Parameters**, then **Knobs** (with **MIDI CC**
+  right after), **Macros**, and the module's **Presets** last. With no module selected the Module
+  block is not there at all (no "Nothing selected"), and a section with nothing in it (no knobs, no
+  macros, no CC, no presets) is not drawn either, so an empty panel is just the knob panel.
+
+- **Inspector: the module's name is the title, and the type sits in the accent** (2026-10-24,
+  branch `ui-redesign`). In the Module block the bold title line is now the module's **name**
+  (FilterC), and clicking it selects the text to rename it in place: no separate Name field. The
+  module's **type** as Clavia calls it ("12dB Static Multimode Filter"), not editable, is the accent
+  text on the right of the "MODULE" heading (a long one narrows to fit). Below: Area and DSP cost.
+  The name no longer appears twice.
+
+- **Inspector: knob panel, Module, then Macros and Knobs** (2026-10-24, branch `ui-redesign`).
+  The panel is now laid out from the top as: the knob panel (its miniature, untouched, with a
+  "KNOB PANEL" label), a **Module** block (a "MODULE" heading with the module's own name in the
+  accent, the module type in full, its area, its DSP cost and a Name field), the module's
+  **Parameters** and **Presets**, and then the whole patch's **Macros** (the morph groups, renamed
+  from "Morphs"), **Knobs** and **MIDI CC**. The umbrella "Assignments" heading is gone, and with
+  nothing selected the Module block says "Nothing selected" while the macros, knobs and CC still show.
+  This replaces the entry below, which was the first attempt.
+
+- **Inspector: the module and the assignments are two sections, shown together** (2026-10-24,
+  branch `ui-redesign`). Selecting a module used to swap the patch's assignments for that module's
+  own, so the module's name took over the "Assignments" heading. Now the header and the list top
+  show the module (name, area, DSP cost, its Parameters, its Presets) and, below, a section of its own,
+  **Assignments**, with the morph, knob and MIDI CC rows of the whole patch (with the number of
+  them), each naming the module it belongs to. With nothing selected the header says "Inspector /
+  Nothing selected" and only the assignments show. The section label ("ALL MOD...") no longer gets
+  cut off: it has the whole row when there is no DSP cost to share it with.
+
+- **Inspector rows and header restyled** (2026-10-24, branch `ui-redesign`). Flat rows with no
+  zebra stripes: the parameter's name on the left in the secondary ink and its value on the right
+  in a monospaced field (rows 30px, were 26); morph, knob and MIDI CC rows lose the boxed "x" for a
+  light cross, and their badge ("Knob 3", "CC 74") becomes a pill; a morph group shows its colour as
+  a dot with its name instead of a coloured band. The header gets a bigger title (15), and the area
+  and DSP cost as bold small labels ("POLY AREA", "COMMON AREA", "ALL MODULES"). Same controls and
+  behaviour underneath: dragging values, typing over the cell, folding the sections, presets.
+
+- **Inspector section titles restyled** (2026-10-24, branch `ui-redesign`). Parameters, Morphs,
+  Knobs, MIDI CC and Presets lose their coloured wash and strong rule: a small uppercase title
+  (in the theme's secondary ink, still readable) with a hairline above it and more air (30px, was
+  22). The rows, the knob map and the name field are unchanged.
+
+- **Synth list restyled** (2026-10-24, branch `ui-redesign`). Same one-row-per-synth list at the
+  bottom of the inspector, in the new look: the synth's number (lit when it is the one being
+  edited), the four slot buttons as rounded squares, the name as a pill with a connection dot and
+  and the load as a thin bar under the row (no number: the header's PVA/E show it). Rows are
+  42px (were 30). Click, drag-and-drop, rename and Ctrl+click behave as before.
+
+- **Header bar: MUTATOR sits between the snapshots and the A/B crossfader** (2026-10-24, branch
+  `ui-redesign`), with a hairline on each side. Order: ... cable colours | snapshots | MUTATOR |
+  A/B | free room | heart, Patreon.
+
+- **Header bar: the gap between groups grows with the window** (2026-10-24, branch
+  `ui-redesign`). The room the window has left over is shared out between the nine groups, from
+  18px (the minimum, narrow windows) up to 48px (a very wide one), instead of one fixed 12 or 18.
+  At 1920px the groups breathe and the free space on the right shrinks to what the 48px cap leaves.
+
+- **Header bar: more room between groups, and MUTATOR after the crossfader** (2026-10-24,
+  branch `ui-redesign`). The gap between groups goes from 12 to 18px, with the hairline in the
+  middle, and MUTATOR follows the A/B crossfader instead of sitting in the right-hand corner,
+  which now holds only the heart and Patreon. The cable colours fold into "Cables" under about
+  1385px (the default plugin width, 1280px, still fits with them folded).
+
+- **Header bar: the cable colours move between the morph dials and the snapshots** (2026-10-24,
+  branch `ui-redesign`), with a hairline on each side. The order is now: name, Voices, Load,
+  Store | morph | cable colours and S | snapshots, crossfader ... MUTATOR | heart, Patreon. Under
+  about 1355px they fold into the "Cables" button, in that same place. The free room is now between
+  the crossfader and MUTATOR.
+
+- **Header bar redesign, step 2** (2026-10-24, branch `ui-redesign`). ABCD moves out of the
+  header to the left of the module chips (fixed, outside the scrolling strip). The module bar is
+  restyled: flat tabs with an underline under the one showing, and the module chips as pills.
+  **Store** is as wide as its text really is, so the word and the bank location no longer overlap
+  (they did at the 1.15 font scale). Every part of the header now has a tooltip (name, voices,
+  load, store, morph, snapshots, crossfader, cable colours, shake, Mutator, donate, Patreon), and
+  so does the ABCD button. The module bar is a little taller (63px instead of 48). Not looked at
+  on screen yet.
+
+- **Header bar redesign, step 1** (2026-10-24, branch `ui-redesign`). Flat bar with no boxes
+  or group titles, in the order: patch name, Voices (number with its arrows), Load (PVA and E,
+  each with its bar and number), Store, the four morph dials, the eight snapshots, the A/B
+  crossfader, the cable colours with the shake key (centred in the room that is left),
+  MUTATOR, ABCD, and the heart and Patreon at the right edge. Every rectangle is now worked
+  out once in `resized()` and the paint and hit tests only read it. "Report a bug" left the bar
+  (Help > Report a Bug has it) and so did the synth name box (the synth list shows it). Too
+  narrow for the seven dots (under about 1376px) they become one "Cables" button with a menu.
+  ABCD moves to the module bar in the next step. Checked in the Release build at 1920px;
+  the narrow mode is built but was not looked at.
+
+- **The plugin keeps its patches in the DAW project** (2026-10-24, #94). `getStateInformation` /
+  `setStateInformation` were empty, so a reopened project showed an empty editor. Now the project
+  keeps the patch of every slot (as the .pch and .var the editor would save, in `model/SessionState`)
+  and the slot on screen; reopening puts them back. They come back **LOCAL** (editor only): nothing
+  is sent to the synth, since opening a project must not overwrite what is on a real G1. The MIDI
+  ports and G1-Emu links were already remembered by the editor's settings. What the editor holds is
+  also kept when its window is closed, and a host asking from another thread gets the last state
+  seen. Tests for the format; the plugin builds (VST3); capture and restore checked in the app
+  (two slots out, empty app, two slots back, B active). Not tried inside a DAW.
+
+- **UI size: the whole interface scales for 4K screens** (2026-10-24, #105). A new **UI size**
+  choice in Editor Options (100%-300%) sets JUCE's global scale factor, so every window, menu,
+  dialog and the module help (F1) grow together; it applies when OK is pressed and at startup.
+  Standalone app only: as a plugin it would rescale the host's windows. Checked in the Release
+  build with 200% in the settings (everything doubled, menus included); the selector in the dialog
+  was built but not clicked through. Manual (EN/ES) updated.
+
+- **The double-click on a module shows the whole "name  cost" badge** (2026-10-24, #104). The
+  badge was capped at 110px, so a long module name ("2/24dB Dynamic Multifilter", the slave
+  oscillators) cut off the DSP cost at the end. Now up to 240px, the longest name with its cost
+  being about 206px; a badge wider than its module starts at the module's left edge instead of
+  sticking out past the canvas. Checked in the Release build with the longest module name.
+
+- **Ctrl+B opens the right panel if it is folded away** (2026-10-24, #107). The Preset Browser is
+  the right panel's Disk tab; with the panel hidden (Ctrl+Shift+I) Ctrl+B and File > Preset
+  Browser only chose the tab and nothing showed. Now they unfold the panel first. Checked in the
+  Release build: panel folded, then the Ctrl+B action: panel back on the Disk tab with its list.
+
+- **The Disk tab lists every .pch under the library folder** (2026-10-24, #106). It only looked
+  inside `Patches/`, `Snippets/`, `Banks/` and `Sets/`, so a library pointed at the folder where
+  someone already keeps their patches, spread over other subfolders, showed an empty list. Now any
+  `.pch` under the library root is a patch; `Snippets/`, `Banks/`, `Sets/` and `Presets/` keep their
+  own meaning and are not listed twice. The options hint says so. Checked in the Release build with
+  a library of `Leads/`, `Antiguos/Bass/` and `Snippets/`: 3 of 3 files, two patches and a snippet.
+
+- **Heart and Patreon buttons in the patch bar** (2026-10-24). Two small icon buttons in the far
+  right corner, like GitHub's Sponsor button: a heart that opens the PayPal donation page and
+  Patreon's mark that opens the Patreon page. The synth name box moves left to make room. The
+  heart, Patreon, MUT and ABCD buttons get tooltips (the bar has its own top-level tooltip
+  window, as the 48px bar would clip a child one). Release build checked by eye.
+
+- **Donate button next to Patreon** (2026-10-24, branch `apoyo-donar`). The About box gets a
+  Donate button (five buttons across now), the About menu a "Donate (PayPal)..." item, and the
+  repo a `.github/FUNDING.yml` (GitHub's Sponsor button) plus a "Support the project" section
+  in the README. The PayPal link lives once, in `VersionCheck.h`. Release build compiles.
+
+- **Banks go to and from the synth's memory directly, as in Clavia's editor** (2026-10-18,
+  branch `bank-flash-transfer`). Read off the wire from editor 3.03 against a real G1
+  (`G1originaleditor/notes/15-bancos-pchlist.md`):
+  - **Save Bank to Disk** asks each position with `41 17 bank position` (FlashDumpRequest);
+    the synth answers with the whole stored patch in one message, opened by a `0x18` section
+    (parsed now), or with an ACK `18 04` for an empty position. Nothing is loaded into a slot.
+    A bank of 99 positions reads in 1.7 s on G1-Emu; the old way loaded each patch into a
+    temp slot and fetched it section by section.
+  - **Send Bank to Synth** sends each patch with the upload NME already had, but its
+    PatchName section reads `37 01 bank position` instead of `37 00 00 00`: the synth writes
+    it to flash and answers `18 00` once written (`18` with anything else stops the transfer
+    as refused). No selectSlot, no Store, no slot left holding the last patch. 7 patches in
+    5.3 s on G1-Emu.
+  - **`.pchList`**, Clavia's bank list: Save writes `BankN.pchList` beside the files, Send
+    reads one (NME's or Clavia's, chosen as a file or found alone in the folder). A folder
+    without a list goes by the files' `NN - ` prefix, as the manual already said it did.
+  - The dialog loses its TEMP SLOT box. A single-bank save no longer needs the patch list:
+    without it all 99 positions are asked.
+  - **MCP**: `save_bank`, `send_bank`, `get_bank_transfer` and `cancel_bank_transfer`. Tried
+    through the bridge on NME + G1-Emu (direct link): the original's 7-patch bank 8 list in
+    5.6 s and read back in 1.1 s, identical to the files Clavia's editor saved; a full 99-patch
+    bank written in 84 s and read in 17 s, 99/99 identical; an NME folder round trip
+    byte-identical; a cancel stops after the patch in progress; slots untouched throughout.
+
+- **The Patch Mutator mutates like the G2's** (2026-10-15, branch `mutator-g2`). Javier found
+  the G2's mutations more musical than NME's, so the G2's own mutator was studied in Clavia's G2
+  Demo (notes in `G2-Emu/NOTES.md`) and its ideas rebuilt here, with no code of theirs:
+  - **Every parameter has a shape** (`getMutationCurve`): linear, finer near the bottom (attack,
+    release, times, feedback, FM amount), finer near the top (an oscillator's or drum's own
+    levels) or finer around the middle (coarse/fine tune, detune, pan, EQ gain, decay). A
+    change is drawn evenly within ±range in that shape's space.
+  - **Set-up switches are never mutated**: on/off, mute, bypass, modes, KBT and LFO range
+    switches, pads, input levels, step counts. Waveforms, sequencer steps and key-quantiser
+    notes still are, as on the G2. Before, everything with a range moved, which is what broke
+    sounds apart.
+  - **A change comes back in at the edges** instead of piling up on the minimum or maximum.
+  - **Probability and Range are tied by the G2's curve** (Range 19 % → Probability 37 %), and
+    Range stops at 50 %. Before, they were tied as `1 − x`.
+  - **No more octave jumps** on oscillator pitch: it is a centred knob like the rest.
+  - Randomize draws each parameter over its whole range in its shape, and leaves the switches.
+  - **The boxes draw the sound as a path**: a turtle reads the parameters in pairs, turning by
+    one and walking the other, so a mother's children draw alike and adding a module bends it
+    (`Mutator::chromosomePath`). Before, it was a bar per sampled parameter.
+  - **Stored sounds follow the patch**: adding, deleting or replacing a module brings every
+    box (Mother, Children, Father, storage) and the variations in line at once, the new
+    module with its current values, as the G2 does; the drawings change with it. The panel
+    looks at the module layout five times a second while it is shown (`Mutator::conform`),
+    since undo goes around the add/delete callbacks.
+  - **Mother and Father start as the patch**, as on the G2: Mutate works straight away,
+    without dragging a sound into Mother first.
+  Checked with `tests/test_mutator.cpp` (8 cases: shapes of real G1 parameters, the tie, edges,
+  switches, the turtle, following the patch) and the whole suite; still to be tried by ear on the G1. Not done yet:
+  Cross and Interpolate do not carry per-parameter morph ranges, which the G2 does, because the
+  variations do not store them.
+
+### Fixed
+
+- **Screenshots from the editor itself** (2026-10-24, `main`). The picture-taking run (`NME_SNAPSHOT_DIR`)
+  takes three more settings, for making screenshots without touching the desktop: `NME_SNAPSHOT_SIZE=1920x1080`
+  gives the window that size, `NME_SNAPSHOT_SCALE=2` makes every picture twice as sharp, and the Mutator
+  has its children drawn (Mutate) before its picture. It also pictures the Themes window as it opens in the
+  editor.
+
+- **Colour swatches without the white edge** (2026-10-24, `main`). The swatches of the Colours page were
+  drawn over a grey checkerboard whose square corners showed at the rounded edge, with a pale outline. The
+  checkerboard now only sits under a translucent colour and is clipped to the rounded shape; the
+  outline is the window's own border colour.
+
+- **Z zooms in and Z again zooms back** (2026-10-24, `main`; asked for by Blaise by email). Z zoomed to the
+  selection and every further Z did the same; going back needed Shift+Z, which resets to 100% and not to
+  where you were. Now the first Z zooms to the selection and remembers the zoom and the place, and
+  the next Z returns to them. Zooming by hand (wheel, Ctrl+plus and minus) starts it over, and with
+  nothing selected Z still resets to 100%. Shift+Z is unchanged. The View menu item does the same.
+
+- **One Themes window instead of a long submenu and two windows** (2026-10-24, `main`). View > Theme was
+  a list of every theme with eight options under it, and the editor and the community list were windows of
+  their own. It is now one item, **View > Themes...**, that opens a window laid out like Editor Options:
+  **Themes** (every theme with a preview of its colours; click to use), **Colours** (the editor), **Community**
+  (with a red dot while something there is new) and **Files** (import, export, save as file, reload, open
+  the folder). The same item closes it again, Ctrl+T still cycles, and closing puts the chosen theme back.
+  The window keeps colours of its own so it does not move while a theme is edited. The manual (English and
+  Spanish) describes it.
+
+- **Module help (F1) in the new look** (2026-10-24, `main`). The help window of a module had the old
+  gold title and a tiny line under it: it has the dialogs' title bar and frame now, 520px wide, 24px of
+  margin, the parameter names in the accent over their text in 13.5px, and it only drags from its title
+  bar (it dragged from anywhere).
+
+- **Found in a last sweep for what the redesign had missed** (2026-10-24, `main`). The **Quick Add**
+  popup (Enter on the canvas) wears the new look: 400px wide, a 48px field, 30px rows with a rounded
+  highlight and 11.5px categories and DSP costs. The **maximise button** of a slot's sub-window is a
+  small rounded square in the accent (it was JUCE's green plus). **Tooltips** are rounded boxes in the
+  panel colour with a hairline and the UI font.
+
+- **Theme editor and Community Themes, in the new look** (2026-10-24, `main`). The two windows still wore
+  the system's title bar and the old controls. The **Theme editor** has its own title bar with the gold
+  cross, a name field and a **Save** filled with the accent, the colour groups as quiet headings, rows of
+  40px with a hairline between them and a rounded swatch, and a footer band with the render-style
+  switch and the status. It keeps colours of its own (the new look's dark ground and amber) instead of
+  following the theme, so it does not move under the mouse while a theme is edited. **Community
+  Themes** takes the editor's title bar, a roomier list (72px rows) in a rounded box, and Install and
+  Update in the accent.
+
+- **The macOS build compiles again** (2026-10-24). The Disk tab's fast scan used `std::filesystem`
+  directory iterators, which the macOS 10.13 target does not have (they came with 10.15), so the macOS
+  job of the build workflow stopped. On macOS the scan uses JUCE's iterator (slower on a huge library);
+  Linux and Windows keep the fast one.
+
+- **Daisy-chained cables take the colour of the net's source output** (#108, teezdalien). A cable chained
+  from an input took the colour of the input it starts at, so a chain from a blue source showed a green
+  cable. `ModuleContainer::colourOf`: a stored colour still wins, a cable from an output is unchanged, and
+  a chained one takes the signal type of the output driving the net; drawing, the cable filters, saving
+  and the synth messages all use it. In the hardware look, jack rings take the colour of the cable plugged
+  in. Existing patches are unchanged because their colours are stored.
+
+- **Store to Bank is confirmed by the synth, and goes to the right synth** (2026-10-24, #109). On G1-Emu a patch stored from the dialog showed
+  "Stored" but the position was empty after a refresh. Clavia's editor 3.03 captured against G1-Emu
+  (`G1originaleditor/notes/16-store-un-patch.md`):
+  - The store now uploads the patch to the slot first, sends `Store`, waits for the synth's
+    one-entry list reply (bank, position, name) and re-reads the patch list. No reply in 4 s
+    reports "not stored" instead of "Stored"; the name is no longer written locally by guess.
+  - `PatchLocationDialog` deals in local slots A-D, but Store, Copy and Move passed it the global
+    slot and used its answer as global: the store went to the first synth, not the one in use,
+    and with a second synth the SLOT box came up empty. They convert now (`SynthSlot`).
+  - A cable made in NME keeps its colour when it goes to the synth live (`NewCable` carries
+    `colourOf`), so a daisy-chained cable (#108) is no longer recoloured after Store + reload.
+  - `tests/test_store_confirmation.cpp` decodes the captured store reply.
+
+- **A saved .pch has the same [Header] line as one saved by Clavia's editor** (#103,
+  2026-10-18, branch `pch-header-flags-103`). Four fields of that line held what the synth sent
+  (`0 0 15 7`) where Clavia's editor 3.03 writes `1 1 1 1`. Read in the original
+  (`0x004d87e0`, `0x00431980`): they are four one-bit flags of unknown meaning, on by default,
+  four numbers in the file and four bits on the wire; nmedit's `unknown3:4` is those four bits,
+  `unknown4:3` is padding, and `unknown2:2` is the top of the separator position, which the
+  original sends as 14 bits. Now `PatchHeader::headerFlags` carries them both ways, and the
+  13-section header no longer puts a file's numbers into the separator's bits. The 205 .pch
+  files Clavia's editor saved here come out of NME with their header line unchanged, and a
+  G1's header read from flash writes the exact line the original wrote for that patch.
+
+- **Dialogs and floaters no longer hide behind the main window** (#98, after Javier noticed
+  windows going behind the app). NME's other windows are top-level windows of their own, and
+  JUCE does not tie them to the main one, so a click on it raised it over them. The slot
+  chooser a double-click in the patch browser opens was the one that hurt: it went behind, and
+  NME looked stuck after a patch or two, waiting for an answer nobody could see. The main
+  window is now their owner, so the system keeps them above it: a transient window
+  (`WM_TRANSIENT_FOR`, libX11 opened at run time) on Linux, an owned window on Windows
+  (`ui/WindowOwner.cpp`). Raising them by hand was tried first and fought the menu bar: the
+  raise took the focus, and File or Edit would not open. On macOS, whose menu bar is the
+  system's, they are raised back above the main window when it comes forward. Checked by
+  Javier on Linux (KDE); not tried on Windows or macOS.
+
+- **A cable keeps the colour the patch stores for it** (#100, reported by email). NME threw the
+  stored colour away and derived it from the source connector, reading a `.pch` and reading a
+  patch from the G1, so a patch came back from NME with other colours: measured over 3,000
+  archive patches, 8 % of cables (22 % of chained ones), and user1/user2, on no connector,
+  could not come back at all; an OscC out into an OscSlvE's Mst, stored grey (master-slave),
+  turned red. Now each cable keeps its stored colour (`Connection::storedColor`), the canvas
+  draws it and hides it by it, and the `.pch` writer and the upload to the synth write it back
+  unchanged, as Clavia's editor 3.03 does; undo of a deleted cable or module gives it back.
+  Only a cable made in NME is coloured by where it starts. Tests: `test_cable_colours` (a
+  `.pch` with user1 and grey on an audio out: read, written back, and sent and parsed back
+  from the synth's format, all unchanged; a cable made anew derives).
+
+- **Linux: no display no longer crashes NME at start-up** (#101, reported by email, on
+  0.17.0). With `$DISPLAY` unset or unreachable (a stale `xauth` cookie
+  after renaming the machine, in that case), JUCE has no screen, and centring the main window
+  segfaulted. NME now checks for a display before making the window, prints "no display to open
+  the window on" with what to check, and exits with code 1. Checked with `DISPLAY=:99`: before,
+  a segfault (139); now the message and exit 1.
+
+- **MCP: a refused connection says where the bridge is turned on** (#102, reported by email). With the bridge off, a refused connection looked exactly like
+  "NME isn't running". `mcp-bridge/server.py` now tells the two cases apart from a timeout:
+  refused says nothing is listening, so either NME is closed or its bridge is off, and names
+  the switch (Editor Options, `Ctrl+,` > MCP Bridge); a timeout says NME is running but busy.
+  The troubleshooting chapter (English and Spanish) explains how to tell which. Checked
+  against a port nobody listens on.
+
+- **MCP: `list_assignments`, `unassign_knob`, `unassign_midi_cc` and `fetch_patch` failed with
+  "name 'port' is not defined"** (#99, reported by bacizone, 2026-10-18). Step 7 of the
+  multi-synth work gave every tool a `port`, but these four only got it in their body, not in
+  their signature. They take `port` now, as the rest do; a check of every tool for names it
+  never defines found no others. Checked by calling the four with `slot` and `port` against a
+  stubbed bridge: each sends both.
+
+- **Adding and deleting modules fast no longer gets the patch rejected** (2026-10-14, G1-Emu #63,
+  reported by Nocticore). A delete is synced by a full upload 80 ms later; the upload dropped the
+  queued edits but not the one already sent, whose ACK then arrived and was taken for the first
+  packet's. The second packet went out while the synth was still on the first, it answered
+  "Error in synth" (code 3), the slot went LOCAL and later edits never reached it. It showed with
+  G1-Emu, whose ACKs for a new module come late (the DSP code is rewritten), and more on a loaded
+  Mac. The upload now waits for that ACK, or for its 3 s timeout, before its first packet
+  (`ConnectionManager::uploadPatch`). Checked against G1-Emu through the MCP bridge with
+  Nocticore's patch: eight Compressors added and deleted in bursts failed on the first burst
+  before, 20 bursts pass after, and a fetch from the synth matches the editor's patch; the unit
+  tests pass. Against a real G1 (rack, OS 3.03) the same bursts fail on the first one with 0.22.0
+  (code 3, and the synth's slot ends up empty while the editor shows the patch), and pass 10 of 10
+  with this fix, the synth's patch matching the editor's after them.
+
+## 0.22.0 — 2026-10-13
+
+### Added
+
+- **NME says when a new version is out** (2026-10-13, #97). On startup, at most once a day,
+  it reads the release tags of this repository from GitHub's tag list (`vX.Y.Z` only: a tag is a
+  release, a push is not). When one is newer than the running build, **About** gets a red dot and
+  a first item "Version X.Y.Z is out: get it on Patreon" that opens the Patreon collection; the
+  status bar says so once. Choosing the item clears the dot; the item stays until that version is
+  installed. Not an updater: the builds are behind Patreon, so NME never downloads anything.
+  Silent when offline or rate-limited. Editor Options: "Tell me when a new version of NME is
+  out", on by default; off also hides the last answer. New `VersionCheck` (`source/ui/`), tested
+  in `test_version_check.cpp` (plain tags only, numeric compare so 0.10 is after 0.9, the highest
+  tag whatever GitHub's order, error answers ignored); tried by Javier with a fake 0.99.0 in the settings. Also fixed on the way: OK in Editor Options
+  no longer puts back what the background checks wrote while the dialog was open (the themes
+  check's date and seen list included).
+- **Community themes from animatek/nme-themes** (2026-10-13, #91). View > Theme > **Community
+  Themes...** opens a window listing the repository's themes (name, author, description), with a
+  New badge on the ones not seen before and Update on the ones whose file changed, and an
+  Install / Update / Use button that downloads the file, checks its SHA-256 against the list,
+  reads it as a theme, writes it as it is into the user themes folder and switches to it. The
+  list is the repository's `index.json`, rebuilt there by CI on every merge
+  (`tools/build_index.py`, which also checks each theme on pull requests). NME reads it on
+  startup at most once a day (Editor Options: "Look for new community themes once a day", on by
+  default), caches it in `community-themes.json` next to the settings, shows "(N new)" in the menu,
+  a red dot on **View** and on **Theme** (as VCV Rack does for its library) until the window is
+  opened (drawn by `AppLookAndFeel`, the app's default LookAndFeel from now on; macOS's native menu
+  bar shows a text bullet instead), and says so in the status bar; Check Now reads it at once. Downloads run off the message thread;
+  on Linux through `curl`, since the app is built without libcurl. New `juce_cryptography` link
+  for the SHA-256. Manual (en/es). Checked: `nme_tests` passes with `test_community_themes.cpp`
+  (index parsing drops file names that could leave the folder; new/seen/changed), the Release
+  build compiles clean, and the live index and theme file from raw.githubusercontent.com match by
+  hash. Tried on the window: installing Tokyo Super Dark from the list works.
+- **NME's own themes are kept in animatek/nme-themes too, and update from there** (2026-10-13, #91).
+  The 14 built-in themes are in the repository as official files (`"official": true`), written by
+  the new `nme_theme_export` tool (`tests/theme_export.cpp`, `ThemeFile::officialJson`: every colour,
+  LF line ends, so the hash is the same on every OS). Community Themes lists them as **Built in**
+  while the repository's copy hashes the same as what NME ships; when one is touched there it
+  offers an **Update**, and the installed official file replaces the built-in in place
+  (`ThemeRegistry::mergeUserThemes`: same index, same saved choice) instead of appearing beside it
+  as "(user)". Checked: `nme_tests` passes with two new cases (official file round trip and state,
+  replacement in place).
+- **A theme can set the render style, and themes import and export as single files** (2026-10-13,
+  #90). A theme file may carry `"render"` (`wireframe`, `hardwareLook`, `knobStyle`, `flatKnobs`,
+  each optional) and, when the theme is chosen (View menu, `Ctrl+T`, Editor Options, the theme
+  editor's Save, an import), those keys are applied over the user's own style. The user's style is
+  kept (`renderBeforeTheme` in the settings) and given back when a theme that sets none is chosen,
+  so a theme's flat knobs do not follow the user into every theme after it. **Animatek Rack** now
+  turns Flat knobs on. The theme editor has a "Save the render style with the theme" box. View >
+  Theme has **Import Theme File...** (checked with the same reader, files over 256 KB refused, a
+  built-in's name gets " (imported)", a user theme of the same name replaced only on confirmation)
+  and **Export Current Theme...**. Manual (en/es) gets a "Your own themes" section, which 0.20 did
+  not have. Checked: `nme_tests` passes with two new cases in `test_theme_file.cpp`; the Release
+  build compiles clean. The theme editor and Community Themes tried by Javier on the window
+  (2026-10-13); import and export not tried there.
+- **A Windows installer for the Patreon builds** (2026-10-13, asked by Javier). `build-binaries.yml`
+  now also makes `AnimatekNME-x.y.z-windows-setup.exe` (Inno Setup 6, `packaging/windows/AnimatekNME.iss`)
+  from the same files as the ZIP, with its SHA-256 and in the same Sigstore attestation, and puts
+  it in the private draft. It installs for the current user, in `%LOCALAPPDATA%\Programs`, so no
+  administrator and no UAC prompt; adds a Start menu entry (a desktop one is optional); replaces
+  an earlier version in place, offering to close a running NME; and uninstalls from Settings →
+  Apps. Settings and patches are never touched. The ZIP stays. Manual (en/es), the README in the
+  package, `PATREON_BUILDS.md` and the release checklist say so. Checked here with 0.21.0's files:
+  it compiles, installs silently with no prompt, shows in the Start menu and in Windows' installed
+  apps, and uninstalls leaving nothing behind. The workflow's new step runs on the next build.
+
+### Fixed
+
+- **The theme editor had no swatch for the module panel colour** (2026-10-13, asked by Javier).
+  `moduleBg` was in theme files but not in the editor: it is now under "Modules and canvas" as
+  "Module panel (empty = each module's own colour)", since transparent means each module keeps its
+  type colour (Nomad, Nord Classic). Rows that can be automatic (this one and the sequencer
+  colours) have an **Auto** button that sets them back, instead of dragging alpha down to 0.
+- **The theme editor's colour picker showed its values black on black** (2026-10-13, reported by
+  Javier). The red/green/blue/alpha boxes took the theme's text colour on the picker's fixed dark
+  background; they now have the editor window's own light-on-dark colours.
+- **Old 2.10 patches are converted as Clavia's editor converts them; most factory patches loaded
+  silent** (2026-10-13, G1-Emu issue #65). A 2.10 file was read with its values copied verbatim
+  and its morph and assignment sections left out. The rules now come from Clavia's editor 3.03
+  itself (`NME303.exe`, read for its behaviour in `G1originaleditor/notes/14-conversion-pch-2.10.md`):
+  - in 13 modules (outputs, OscA/OscB/OscSlvA, LFOs, FilterE/FilterF, the 1-4 and 4-1 switches,
+    SpectralOsc) a selector's 0 meant "off": 3.0 takes it one lower and adds the mute or bypass
+    2.10 did not have. Outputs, waveforms and filter types were one step off, and an "off" one
+    played;
+  - in 10 modules (the slave oscillators, OscC, PercOsc, FormantOsc, DrumSynth, the sine bank's
+    six) the switch meant "on", the inverse of 3.0's mute: they arrived muted (FM Dream 2, Poing,
+    Big Syn...);
+  - the switches after the last `P` come packed in `BP0`, which was ignored: every sequencer's
+    steps came out empty (In The Air);
+  - the morph knobs were a module (type 6), which was dropped: its four values are now the morph
+    groups', and `[Morphs]`, `[Knobs]` and `[Controllers]` (with velocity and note on a morph as
+    controllers 127 and 126) become the morph, knob and MIDI CC maps; `[Notes]` the patch notes.
+
+  Checked: `nme_tests` passes, with `test_pch_legacy210.cpp`, which fails without it. Over 800
+  patches the community archive holds in both formats, the parameter values that differ from the
+  3.0 copy drop from 3,486 to 1,305 of 75,772, and what is left is the copies' authors' own edits
+  (both formats show a waveform's full range, 0 to 4, so the conversion is not what differs). In the
+  emulated G1, of 40 2.10 factory patches 16 were silent; now all sound but five that are silent by
+  design: two need the MIDI clock running, one starts when knob 4 is turned (its notes say so), and
+  two process the audio inputs.
+
+- **Every port looked taken after a few emulators came and went** (2026-10-08). A port whose
+  emulator had gone keeps that emulator's direct link as its device; MIDI Setup could not show it,
+  left the port's lists empty, and took that as a change: OK or Apply saved the port as switched
+  off by hand, and the editor never gave it to an emulator again. One by one the ports went, until
+  new emulators found none free while most were empty. MIDI Setup now keeps a device it cannot
+  show, a port is only made the user's when the user changes it (Apply retrying an enabled port is
+  not a change), and on the first start the ports saved that way are handed back to the emulators
+  (`emulatorPortsRepaired`). Seen in Javier's settings: Ports 3 to 8 switched off, none by him.
+- **A new emulator kept "Modular" until it was clicked** (2026-10-08). The name is given once the
+  synth's settings and a patch have both arrived; when that moment was missed the editor did not
+  try again until something else brought a patch. It now tries again on every look for emulators
+  (every 3 s) while one is still waiting for its name. Not tried on the window yet.
+
+## 0.21.0 — 2026-10-08
+
+### Added
+
+- **Hardware look follows the theme editor** (2026-10-08, PR #93; Grant Atkinson (teezdalien)).
+  The knurled knobs take their metal from the theme's Knob colour (black is that colour taken down
+  to near black), and their pointer turns light or dark to stay readable, using the theme's pointer
+  colour when it contrasts enough. Hardware jacks get a thin rim in the Jack outline colour, and the
+  jack rings and cords now follow the theme editor's "... cable and jack" swatches together, so a
+  cable still matches its jacks. Lit step and activity LEDs have their own colour, "Step LED on
+  (hardware look)", saved as `ledStep` in theme files (green by default). Checked: builds and the
+  tests pass; the three knob styles looked at by Javier (2026-10-08).
+- **G1-Emu without a MIDI port: the direct link, found and connected on its own** (2026-10-06, #83,
+  G1-Emu #8). G1-Emu listens on a local socket (127.0.0.1, from port 47310, one per instance) and
+  NME talks to it there with the same SysEx as the PC Port, with no virtual MIDI port, driver or
+  loopMIDI: this is the way to the emulator where none can be made (the plugin on Windows). Every
+  3 seconds the editor looks for instances and connects each free one to a free port of MIDI Setup
+  (a port switched off, connected, or kept for MIDI ports that are plugged in is left alone);
+  Device > Connect to G1-Emu Automatically turns it off. The instances are also listed in MIDI
+  Setup as "G1-Emu (direct link)". `source/midi/DirectLink.*`, used by `MidiDeviceManager`, so the
+  rest of the editor sees a connection like any other. Checked: `tests/test_direct_link.cpp`
+  (SysEx split across any cut of the stream) and, against a running `g1run`, the editor's IAm over
+  the link answered by the emulated G1 (`NME_G1EMU_LINK_TEST=1`); the automatic connection in the
+  window tried by Javier (2026-10-08). An instance already connected through its MIDI PC Port is not connected
+  again over the link: G1-Emu's greeting names its PC Port's ids (or its name, where JUCE gives no
+  id) and the editor compares them with its ports.
+- **Rename a synth with a double-click on its name** in the slot panel (2026-10-06). It sends the
+  synth its own settings back with the new name (up to 16 plain characters), as Synth Settings
+  does, so the name is the synth's and not only the editor's: each G1-Emu instance keeps its own
+  (flash.bin for the standalone, the DAW project for the plugin), which is what tells them apart.
+  Tried by Javier on the window (2026-10-08).
+- **A new G1-Emu instance gets a name of its own** (2026-10-06). A new plugin instance starts as a
+  copy of the standalone, name included. When an emulator this editor connected by itself still has
+  its factory name ("Modular") or answers to a name another connected synth already has, the editor
+  gives it one from a short list ("G1 Basalt",
+  "G1 Nebula"...) and stores it in the synth, as a rename would. Never a real G1 nor a port set by
+  hand; the emulator itself keeps its factory behaviour. Not tried on the window yet.
+- **Ports follow the emulators** (2026-10-06). A G1-Emu instance found on its direct link switches
+  its port on (Enabled in MIDI Setup) and connects; when the instance goes, the editor switches that
+  port off again, its row leaves the slot panel, and if it was the synth being edited the editor
+  moves to one that is still connected. A port switched off by hand in MIDI Setup stays off.
+- **Only the windows of the synths that are there** (2026-10-06). On startup only Port 1's slot
+  windows come back from the saved layout; another synth's windows open when it connects (its
+  enabled slots, as before) and close when it disconnects, so the work area no longer starts full of
+  "No patch open" windows for synths that are not there. Editor Options > Reopen Every Slot Window
+  of the Last Session brings back every window left open instead, and keeps them open.
+- **The slot panel has a frame** (2026-10-06): a rule that ends the inspector above it, a "SYNTHS"
+  header with how many are connected, and a margin before the status bar. When more G1-Emu
+  instances are running than there are free ports, the header says how many are waiting in the
+  warning colour instead of leaving them out silently. The load bar loses its white marker: the
+  colour edge and the percentage say the same. MIDI Setup scrolls its port groups, with OK,
+  Cancel and Apply always in sight.
+- **The slot panel shows only the synths that are there** (2026-10-06). Port 1's row always, any
+  other port's row while it is connected or connecting, or while it is the one being edited; the
+  View menu's slot list follows. The bar's height follows the rows.
+- **Two synths at once, the way the original editor does it** (2026-10-05, #84, #88; tried by
+  Javier with a real G1 and G1-Emu at once). MIDI Setup is now one group per port (In, Out, Enabled and
+  the synth's Status, with OK / Cancel / Apply), and each enabled port is its own connection with its own
+  four slots. Slots are numbered globally (synth * 4 + slot), so patches, windows, undo and snapshots keep
+  working with a bigger range; `SynthHub` (`source/midi/SynthHub.h`) turns a global slot into its synth and
+  its local slot, and the calls that carry a slot are routed by it. The slot panel has one row per synth
+  (click its name to edit that synth), each patch window is titled with its slot, patch and synth ("Slot A - Bella - animatek", or the port until the synth says its name), the tiling is a grid
+  from four windows up, and the saved ports of the first synth keep their old settings keys. The MCP bridge
+  takes an optional `port` (1-based) on every slot tool. Slot sets, the bank browser and the bank transfers
+  follow the synth being edited. Eight ports since 2026-10-06 (the original editor has four; G1-Emu's direct link
+  serves eight instances): the number is `kMaxSynths` in `source/midi/SynthHub.h`. The saved window
+  order uses one character per slot from 0-9a-v (32 slots) and the open-window masks are unsigned. The "show/hide slot" menu ids moved to 1000+ (they overlapped the theme
+  list's 200+), and the window order is saved in hexadecimal so sixteen slots fit.
+
+### Fixed
+
+- **Plugin on macOS: the editor no longer takes over the DAW's menu bar** (2026-10-08, #95). The
+  editor set its menus as the application's menu bar whether it ran as the app or inside a host, so
+  after opening it in Ableton the host's own menus (Settings, opening a project) were gone. Only
+  the app sets them now (`JUCEApplicationBase::isStandaloneApp()`); in a DAW the menus stay in
+  the editor's window, where they already were. Not built or tried on a Mac yet.
+- **Synth Settings: Global Sync is the number of quarter notes, 1 to 32** (2026-10-08, #92). It was
+  a checkbox that wrote 1 (2 quarter notes) whenever it was ticked, so pressing OK, even without
+  touching it, turned a G1 set to 4 quarter notes into 2. It is now a selector like the MIDI
+  channels, showing the field plus one as the G1's own GLOBAL SYNC page does
+  (`SynthSettings::globalSyncQuarters()`). Checked: `tests/test_synth_settings_clock.cpp` (1-32
+  through an encode/decode round trip) and by Javier on a synth (2026-10-08).
+- **Opening a patch from the Disk browser (or File > Open) closed the editor** (2026-10-06). The
+  slot chooser was filled with every slot of the editor (32 now, eight synths of four) into an
+  array of four, and it was handed a global slot as if it were 0-3. It now lists the four slots of
+  the synth being edited, labelled with it (2A..2D), and loads into that synth's slot. Compiles;
+  not tried on the window yet.
+- **No "No synth" row for Port 1 when the only synth is on another port** (2026-10-06). Port 1's
+  row was always shown; it now follows the same rule as the others: there while connected,
+  connecting or being edited, so the panel is never empty.
+- **Emulators found at startup: renamed in a loop, or counted as gone** (2026-10-06). Seen with three
+  G1-Emu plugins in Bitwig and NME's log: (1) the automatic name was sent before the synth had a
+  patch, with patch id 0, so the synth ignored it, came back "Modular" and was renamed again and
+  again; it is now one try per connection, made once the synth has a patch (checked: "G1 Ferro"
+  sent with pid 1 and confirmed by the synth). (2) A synth on the direct link gets 15 s to answer
+  the greeting, which is said again every 3 s, instead of 3 s: emulators sharing a DAW's CPU can be
+  slower than a G1. (3) A synth that has not answered yet is "Disconnected" with its link still
+  open: its port is no longer switched off nor its windows closed for that, nor given to another
+  instance; only a connection that is really closed does that.
+- **Every synth's name, not "Modular"** (2026-10-06). On connecting, only the synth being edited was
+  asked for its settings (where its name is) and its bank list; its ports were saved and its slots'
+  edits re-enabled only for it too. All of that is done for every synth now, so a real G1 called
+  "animatek" beside G1-Emu reads "animatek".
+
+## 0.20.0 — 2026-10-05
+
+### Added
+
+- **The slot panel is now a synth row, like the original editor's** (2026-10-05, #88, first step). The four `A : PatchName` rows are one line: the `A B C D` buttons, the synth's name in a box (dark, as the synth being edited) and its DSP load as a green-to-red bar, which is what its slots add up to, with a marker at the value and the percentage under it; it refreshes with the LED blink, so edits reach it without every call site saying so. The slot LED is a bar under each letter (blinking = focused, fixed = enabled, off = disabled), LOCAL is an orange dot on the button; click, Ctrl+click, right-click and dropping a patch on a button work as before. The patch names per slot are no longer listed here (they are in the header bar and the sub-window titles). The `MIDI`, `Library` and `Store` buttons are gone from the panel: MIDI Settings opens with **Ctrl+M** (also in the Device menu), the library folder is in Editor Options and Store to Bank in the Device menu. One synth for now; the row is meant to repeat up to four (#84).
+- **Where the editor is connected, in the status bar** (2026-10-05, #83, first part). A label on the right reads `Real G1 (port)`, `G1-Emu (port)` or `Not connected`. Until G1-Emu has its direct link (G1-Emu#8) the emulator is told by its port name (`G1Emu`, `G1Emu 2`, ...). `source/midi/SynthLink.h`, `tests/test_synth_link.cpp`.
+- **Theme editor** (2026-10-05, #90, step 2; the colour options asked for by Grant). View > Theme > Edit Theme Colours opens a window with a swatch per colour, grouped: LEDs and meters, cables and matching jacks, morph knobs, sequencers, knobs, modules and the app. The canvas follows live while a colour is dragged; Save writes a user theme file, closing without saving restores the chosen theme. New colours: NoteSeqA/CtrlSeq slider grip, EventSeq lit step, NoteSeqB notes and playhead note; left empty they keep the old derived look.
+- **Theme files and a user theme folder** (2026-10-05, #90, step 1). A theme can be saved by name to `~/.AnimatekNME/themes`, reloaded and opened from View > Theme. Grant's drawing code now carries his credit in its headers (licence confirmed by him).
+- **Hardware look: an optional skeuomorphic way to draw the canvas** (2026-10-05, #89;
+  code by Grant (teezdalien), a Patreon supporter, integrated by Claude). Knobs, jacks,
+  module faceplates, displays, sliders, LEDs, meters and cables are drawn as physical
+  hardware instead of flat shapes. It is a render style, not a theme: it works over every
+  theme, like Wireframe, is off by default and is ignored while Wireframe is on. `Ctrl+H`
+  (macOS: `Cmd+Shift+H`), View menu, or Editor Options > Appearance, where a knob style
+  can be picked: Domed cap, Black knurled, Aluminium knurled (renamed from Grant's
+  original names to avoid a trademark). All the drawing is in the new header
+  `source/ui/SkeuoDraw.h`, in canvas coordinates, so hit testing and cable anchors are
+  untouched. Builds and the unit tests pass; Javier looked at it with the Release build and
+  it runs smoothly (the Debug build is visibly slower). Not measured on a very large patch,
+  and **Grant has not yet confirmed the licence of his contribution.**
+
+- **Flat knobs, and an "Animatek Rack" theme** (2026-10-05, #89; Claude, at Javier's
+  request). A second knob look for the normal (non-hardware) mode, taken from the Animatek
+  modules for VCV Rack: a disc with a thin rim, a slightly different face, a pointer, and
+  the value painted over the rim (bipolar ranges fill from the centre). Editor Options >
+  Appearance > "Flat knobs"; off by default, ignored with Hardware look or Wireframe on.
+  The colours follow the theme: light disc and dark pointer on light themes, dark disc on
+  dark ones, and the arc takes a new per-theme colour (`ColorScheme::knobArc`: the palette's
+  blue, or indigo on the light themes). A morph group still colours the rim. New theme
+  **Animatek Rack**, last in the list so saved theme indices do not move: bluish graphite
+  panels, pale blue-grey text and the style guide's accents. Builds, tests pass, and Javier
+  looked at it on the Release build; some themes still need their colours polished.
+
+### Changed
+
+- **Sine Bank: the ratio arrows sit beside the tune knob** (2026-10-05, #89; Grant,
+  integrated by Claude). The two-halves bar under each ratio window hid the "Tune" label.
+  Drawing and hit test now take the arrow rectangles from one helper
+  (`source/ui/PartialArrows.h`) so they cannot drift apart, and the first column is moved
+  3 px in from the module's left edge.
+
+- **A patch fetch skips the common area's parameters and names when it has no
+  modules** (2026-10-04; Claude, from the original editor, see
+  `../G1originaleditor/notes/12`). The original asks for the common area's
+  `4C 00` and `4E 00` only when its module list is not empty. NME asked for
+  both always, two round trips for nothing on most patches. Once the common
+  module list comes back empty those two requests are dropped from the queue
+  and counted as received, so the patch does not read as incomplete. The poly
+  area is never skipped. Tried on G1-Emu with a patch with an empty common
+  area (the synth answered 11 sections instead of 13, patch received complete,
+  34 poly modules as in the `.pch`) and one with common modules (13 sections as
+  before). Not tried on a G1. Unit test for `moduleDumpCount` added.
+
+### Fixed
+
+- **Buttons sometimes needed two clicks** (2026-10-04, #82 by Nocticore; Claude).
+  `mouseDrag` had no case for a button, so the pointer drifting a pixel during a
+  click fell into the generic path, which puts the parameter back to the value it
+  had when the press began and sends it: the new value went out, then the old one
+  a few ms behind it, exactly as in Nocticore's SysEx dumps (`04 03` then `04 00`;
+  mute `01` then `00`). A button now ignores drags. Found by reading the code and
+  matched against the dumps; **not reproduced or tried on a synth or with a
+  trackpad.**
+
+- **Patches wrapped in a MacBinary header open** (2026-10-04, #87; Claude). Old
+  Mac patches carry 128 binary bytes (name, type `PCH `, creator `NORD`) before
+  the text, and its leading 0 made the reader see an empty file. The header is
+  now taken off (`PchFileIO::patchTextFromBytes`). Tried on all six of them in the
+  community archive; unit test added.
+
+- **Synth error codes 3, 5 and 6 were mislabelled** (2026-10-04; Claude, from the original
+  editor). NME called 5 "no slot focused" and 3/6 "non-fatal warnings". The original editor's
+  own table says 3 = "Error in synth", 5 = "Stream execute error. Synth may be corrupted.
+  Please turn it off and on." and 6 = "Unfinished bubble error". The numbering was checked on
+  G1-Emu (a bad checksum comes back as 4, as in that table); 3, 5 and 6 were not provoked.
+  One function, `synthErrorName`, now serves both the console and the status bar, which had
+  their own copy. The MCP `synth_error` event carries the new description text. Unit test added.
+
+- **The module bar listed modules in modules.xml order, not the original's**
+  (2026-10-04, #81 by Nocticore; Claude). Each category now follows the order of
+  the original editor's icon bar (read off its screenshots in
+  `Implementaciones/Icon Bar Icons`): Keyboard, Keyboard Patch, MIDI Global, ...
+  in In/Out, Master Osc first among the oscillators, and so on. Also applies to
+  the module tree. A module missing from the list goes last. Mixer, Audio and Logic were first read off icons and then corrected against the original exe's own menu builder (`G1originaleditor/notes/02-orden-real-barra-modulos.md`).
+
+- **Oscillator note names jumped an octave at F#** (2026-10-04, #80 by
+  Nocticore; Claude). `fmtNote` rounded the octave instead of flooring it, so
+  every note from F# up read an octave high. Same cause as NoteSeqB's #76.
+  Unit test added.
+
+- **Sine Bank: the ratio arrows reset an oscillator's level** (2026-10-04,
+  reported by Grant on Patreon; Claude). The arrows reset the fine detune as a
+  hard-coded `p3`, which on `OscSineBank` is osc 1's level, not any fine. The
+  fine is now the parameter after the coarse. Builds; not tried by ear.
+
+- **Patches lost a module and a cable, or put everything in the common area**
+  (2026-10-02, Javier's request; Claude; #85, #86). The per-area sections of a
+  `.pch` open with the area number, and the reader took it from the first line
+  and the rows from the second on. Files that glue the first row to the area
+  (`1 1 18 1 10`) lost that module or cable without a warning (1,344 patches
+  of the community archive), and files with `\r\r\n` line endings read the
+  area from an empty line as 0, so every module went to the common area (9).
+  `PchFileIO::splitAreaRows` now skips empty lines and keeps whatever follows
+  the area as the first row, for `[ModuleDump]`, `[CableDump]`,
+  `[ParameterDump]`, `[CustomDump]` and `[NameDump]`. Verification: two new
+  test cases (`test_pch_area_rows.cpp`) that fail without the fix; full suite
+  passes, also under ASan/UBSan; `nme_pch_dump` over the 29,639 readable
+  archive patches against g1-taller's reader: 27,763 identical (26,478
+  before), none left with #85 or #86, the rest only editor decisions (empty
+  titles filled in, titles cut to 16, clamped values) or odd files.
+
+### Added
+
+- **The synth's display follows the knob you grab** (2026-10-04; Claude, from a capture of the
+  original editor against G1-Emu). Like the original, NME now sends a `ParamFocus` (cc 0x13, sc
+  0x2F, no checksum) the first time a different parameter is moved in a slot, from the canvas, the
+  inspector, the knob floater or the morph knobs, and then the value. The frame is byte for byte the
+  captured one (unit test). Undo, morph sweeps and randomize still send values only, so they never
+  move the synth's focus. The emulator does not answer a focus, so **what the G1's display does
+  with it has not been seen yet**: check on hardware.
+
+- **Incoming checksums are checked, and a `CableRecolor` message exists** (2026-10-04;
+  Claude, from reading the original editor with Ghidra, see `../G1originaleditor`).
+  `SysEx::decode` now reports whether a frame carries a checksum (header bit 4, the
+  bit the original reads) and whether it matches; `NmProtocol` counts and logs a
+  mismatch but still dispatches the frame, because nothing is known to fail yet and
+  dropping on a misread flag would cut the link. `RecolorCableMessage` (sc 0x54) is the
+  original's way of recolouring a cable on the synth; nothing calls it, so cable colour
+  still changes only in the editor. Unit tests added (3 cases). **Neither has been tried
+  on a synth.** Docs: the envelope is `F0 33 [cc|slot] 06`, not `F0 33 06 [cc|slot]`
+  as `CLAUDE.md`, `AGENTS.md` and `RESEARCH.md` said.
+
+- **`nme_pch_dump`: a reading battery for the patch loader** (2026-10-01,
+  Javier's request; Claude). A console target next to the tests
+  (`tests/pch_dump.cpp`): it reads every `.pch` path on stdin with `PchFileIO`
+  and prints, one JSON line per patch, what NME understood (modules with
+  their parameter, custom and title values; cables as pairs of ends). The
+  `g1-taller` repo compares that with its own reader over the 29,639 readable
+  patches of the community archive: 26,478 match, 1,784 differ only by editor
+  decisions (empty titles filled with the module name, titles cut to 16,
+  out-of-range values clamped), and the rest are real reading bugs: #85 (area
+  number on the first row: 1,344 patches lose a module and its cables), files
+  with `\r\r\n` line endings (9 patches: everything lands in the common area)
+  and MacBinary-wrapped files NME cannot open (10). Verification: builds; ran
+  over the whole archive in ~45 s.
+
+## 0.19.0 — 2026-09-27
+
+### Added
+
+- **MIDI settings: Reconnect, and a dialog that follows the connection**
+  (2026-09-27, Javier's request; Claude). While connected the dialog offers
+  **Reconnect** beside **Disconnect**: the handshake again on the ports chosen
+  in it, so switching between a real G1 and G1-Emu is one click
+  (`ConnectionManager::connect` already drops the old connection first). Enter
+  presses Connect/Reconnect, never Disconnect. Also fixed: the dialog kept the
+  state it opened with, so Connect stayed Connect after the synth answered;
+  `MainComponent` now passes it every connection change while it is open. The
+  dialog is a little wider for the status text. Manual: chapter 1, English and
+  Spanish. Verification: builds; Javier tried Reconnect and the switch between
+  synths in the dialog.
+
+- **MCP: choose the MIDI ports and reload a slot from the synth** (2026-09-27,
+  Javier's request; Claude). Four bridge tools: `list_midi_ports`,
+  `connect_midi(input, output)`, `disconnect_midi` and `fetch_patch(slot?)`.
+  `connect_midi` does what the MIDI settings dialog does, naming a port by id,
+  exact name or a part only one port has (`McpRules::matchPort`); anything
+  ambiguous or unknown is refused with the list, because on a machine with
+  G1-Emu and a real G1 the wrong port is the wrong synth. `fetch_patch` asks the
+  synth for a slot again (`MainComponent::refetchSlotFromSynth`), refused while
+  another transfer runs. Also fixed: `get_synth_status` kept reporting the
+  previous synth's name for a second or two after switching; it is now null
+  from a disconnect until the new synth sends its settings.
+  Verification: builds; 4 new test cases (id, name, exact over partial,
+  ambiguous and empty names); full suite passes, also under ASan/UBSan. Live:
+  switched three times between G1-Emu (`PC Port`, "Modular") and the real G1
+  (`UM-ONE`, "animatek"), the name read null right after each switch and then
+  the right one; ButohDrone fetched back from both matched the file section by
+  section except the header's 3-bit `unknown4`, which the OS itself rewrites.
+
+- **Slot sets: save the four slots as one sound and load them back together**
+  (2026-09-13, Javier's request; Claude). Layered patches, one per slot, only
+  make their sound as a group, and the G1 cannot store that: a bank position
+  holds one patch and performances only arrived with the G2. **File > Save Slot
+  Set...** asks for a name, optional notes and, per slot, *Include patch*,
+  *Switch slot off* or *Leave as is*, so a set can be two or three patches. It
+  writes `Sets/<name>/` in the preset library: a copy of each patch with its
+  `.var`, named after the slot letter, and a `<name>.nmset` JSON manifest
+  (`source/model/SlotSet`). **File > Open Slot Set...** or a double click on the
+  new **SET** entries of the Disk tab (with their own filter) says what goes
+  where and what it replaces, then loads the patches one at a time, each
+  waiting for the previous upload's ACK, switches slots on/off as saved with a
+  single mask message (`ConnectionManager::setSlotPins`) and moves focus to a
+  slot the set leaves on, since the synth never disables its focused slot.
+  Disconnected, it loads LOCAL and touches no enable state; a failed upload
+  leaves that slot LOCAL and is reported at the end. Manifests naming files
+  outside their folder, unknown modes or a newer version are refused. The bank
+  location is recorded (`414`) but not used yet: loading always uses the set's
+  own copies. Manual: chapter 4 *Slot sets* and chapter 6 `.nmset`, English and
+  Spanish. Three starter sets (Mareas en Re, Horizontes, Fractura) were created
+  in the library from `patches/*-ABCD/`, bank numbers 406–417.
+  Verification: builds; 8 new test cases (manifest round trip, refusals, file
+  and folder names, bank numbers, enable mask and focus); full suite 105 cases,
+  2,859 assertions, also under ASan/UBSan. Javier tried it the same day and
+  reports that it works.
+
+- **Twelve original G1 patches and a private ABCD patch guide** (2026-09-13,
+  Javier's request; Codex). Bank 406–409 holds Mareas en Re with the user's
+  live tweaks preserved and slot-letter names. This includes A at 115 BPM
+  and B at 52 BPM with its clock stopped. Bank 410–413 adds Horizontes:
+  four continuous drones with independent smooth random sources, quantized
+  melody/countermelody, and no clocks, sequencers or triggered envelopes.
+  Bank 414–417 adds Fractura: kick/sub, FM metal/tom, digital hats and acid
+  voice, with 4:3, 8:3 and 3:2 internal clock ratios and 5/7/11-step cycles.
+  New parts start at 132 BPM with free phase between slots. Pitched voices
+  share D harmonic minor. All twelve have eight knobs and two morph groups.
+  The final working slots hold Horizontes. Later live A-drone and D-techno
+  performances are also preserved as separate snapshots; the latter was
+  reconstructed from the reported parameter/morph events before restoring
+  the drones. Files and limits: `patches/README.md` and
+  `patches/generative-collections/verification.json`.
+  Verification: all eight new patches parsed and loaded on G1 OS 3.03,
+  four enabled slots with one voice each, live generator/sequencer activity,
+  bank cache listing all twelve names at 406–417. Intermittent B upload
+  timeouts were recovered from disk; no synth errors after recovery through
+  event 464. Parameter ranges, morph endpoints, scale masks, eight knob
+  assignments per new patch and connected audio paths validated. Two short
+  stereo-mix captures through Komplete Audio 6 contain signal with no clipped
+  samples (techno peak −13.51 dBFS; drones −11.72 dBFS); these are not isolated
+  stems or a listening assessment. No power-cycle or memory-recall test.
+  The patches and their guide live outside the repository (`patches/` is not
+  tracked) and are not part of the release.
+
+- **Key Quantizer scales on any root, and the one it is on now** (2026-09-13,
+  Javier's request). The right-click menu already had sixteen scales, all on C and
+  undocumented, so A minor meant choosing C's natural minor and moving every switch
+  by hand. The **Scale** submenu now opens with what the switches spell at the
+  moment, then Chromatic, then one list per root from C to B, and the current scale
+  is ticked. Every scale with those notes is ticked, since the switches do not know
+  the root: the white keys are C Major, A Natural Minor and D Dorian at once. New
+  scales: Phrygian Dominant (Andalusian), Double Harmonic, Hungarian Minor,
+  Neapolitan Minor and Major, Hirajoshi, In-sen and Diminished (H-W). Scales are
+  written once as intervals in `source/model/KeyQuantScales.*` and moved onto the
+  switches for the root chosen.
+  Verification: `tests/test_keyquant_scales.cpp` checks that the sixteen scales on
+  C write exactly the switches the old menu did, the move to other roots (E
+  Andalusian is E F G# A B C D), recognition of every scale a set of switches
+  spells, and the switch ids against the module description; the suite passes, 97
+  test cases / 2,766 assertions, plain and under ASan/UBSan. **Not verified:** the menu on screen. Choosing a
+  scale is still one undo step per switch, as it was.
+
+- **Replace a module with another of its family, from its right-click menu**
+  (2026-09-13, Javier's request). Turning a FilterE into a FilterD used to mean
+  deleting it, adding the new one and wiring it all again. "Replace with" lists the
+  module's own family, each entry with its DSP share and how many cables it would
+  drop, and swaps it in place as one undo step. It keeps the position, the name if
+  the module was renamed, the cables on connectors the new type also has (by name,
+  or where only one choice exists: FilterD's lp into FilterE's single out), the
+  values of parameters with the same name and range, and the knob, morph and MIDI
+  CC assignments on those parameters. Anything else is dropped and said in the
+  status bar, never rewired to a plausible guess: an OscA's sync does not become an
+  OscB's FM input. A taller module pushes the ones below it down the column, or is
+  refused if the column has no room. The MCP bridge gets the same as
+  `replace_module`. Logic in `source/model/ModuleReplacement.*`, the undoable swap
+  in `ReplaceModuleAction`.
+  Verification: `tests/test_module_replacement.cpp` covers the connector and
+  parameter matching against the real module descriptions, the family list, and a
+  swap with a cable, a knob, a morph and a CC through undo and redo; the suite
+  passes, 92 test cases / 2,398 assertions, plain and under ASan/UBSan. Javier
+  tried it in the editor the same day and it works; edge cases to come from use.
+
+- **The MCP bridge can read the synth back, and assign knobs, morphs and MIDI CCs**
+  (M1, and the groundwork for testing against hardware, 2026-09-13). Until now a
+  client could send edits but never learn what the synth made of them. Thirteen new
+  tools. `get_synth_status`: connection and synth OS version, the slot the synth
+  has focused versus the editor's active tab, transfers in flight, and per slot the
+  patch, LOCAL, enabled, voice count and bank location. `get_events`: a 512-entry
+  log of synth errors, connection changes, values the synth reported itself (a
+  front-panel knob, a morph dial, a MIDI CC), slot focus and enable changes, patches
+  received or incomplete and voice counts, read with a cursor that says when the log
+  wrapped. `read_lights`: per-module LEDs and meters for the focused slot. `list_bank`: the patch name in
+  each position of a synth bank, so a store can pick a free one.
+  `list_assignments`, `assign_knob`/`unassign_knob`, `assign_morph`/`unassign_morph`,
+  `assign_midi_cc`/`unassign_midi_cc`, and `set_morph_value` and `play_note` to hear
+  or meter the result. Assignments go through the same undo actions as the canvas. A
+  knob or CC already in use is refused unless the caller asks to replace it, and one
+  undo then gives it back; morph groups are capped at the G1's 25 assignments; knobs
+  are named as on the panel ("Knob 7", "Pedal"), and a bare "7" is refused as
+  ambiguous. `set_parameter` now shares its parameter lookup with the new tools,
+  with the same behaviour.
+  Verification: `tests/test_mcp_event_log.cpp` (cursor, limit, wrap-around) and
+  `tests/test_mcp_rules.cpp` (knob names, ranges); the full suite passes, 86 test
+  cases / 2,284 assertions, plain and under ASan/UBSan, and `server.py` registers
+  all 29 tools. Against a G1 (OS 3.03) the same day, in a scratch slot: a patch
+  built over the bridge, notes played, the ADSR's gate LED and the LFO's LED read
+  back through `read_lights`, knobs assigned, moved, refused when in use and
+  removed, a morph group put on a knob, two morph assignments with ranges, a CC,
+  the morph dial turned and everything unassigned again. 44 calls, and no synth
+  error or disconnect in the event log. **Not verified:** the sound itself, which
+  nobody listened to on this side, and the front-panel LEDs. The G1 sent no
+  voice-count change while notes played, so `voice_count` is not a way to tell a
+  note sounded. LOCAL slots still receive edits while connected (S4).
+
+### Changed
+
+- **Disk tab type filters are text chips now, not icons** (2026-09-18,
+  Javier's request; Claude). The six abstract icons (grid, sheet, brackets,
+  stacked squares, bars, a struck-out "2") said nothing about what they kept.
+  Each filter is now a neutral chip with the word its rows carry (ALL, PATCH,
+  SNIP, BANK, SET); only the active one is highlighted, so the row tags stay
+  the one place with colours. Chips never cut their label: on a narrow panel
+  the padding tightens instead. *Hide PCH2* was drawn like one more filter though it
+  narrows whichever one is active; it is now a **Hide 2.10** checkbox next to
+  the file count. The count line no longer trails the library path, which
+  never fit; the path is its tooltip now.
+
+### Fixed
+
+- **The source builds again with the compilers CI uses** (2026-09-27; Claude).
+  `KeyQuantScales.cpp` used `size_t` without including `<cstddef>`, which this
+  machine's compiler forgave and CI's did not: every push since the Key
+  Quantizer scales failed to build there. Verification: CI green again.
+
+- **Closing G1-Emu (or unplugging the MIDI interface) disconnects the editor**
+  (2026-09-27, found testing against G1-Emu; Claude). The ports vanished and the editor went on saying "Connected",
+  sending into nothing, until the user reconnected by hand; nothing reported
+  it, because a synth that is gone cannot time out a request nobody makes.
+  `MidiDeviceManager` now listens to JUCE's device-list changes
+  (`MidiDeviceListConnection`) and, when a port it has open leaves the system,
+  the connection drops with "MIDI port gone: <port>" (`ConnectionManager::
+  disconnect` takes the reason). Verification: a new test opens a virtual port
+  as the synth, connects, destroys it and expects the disconnect (fails without
+  the change; skipped where virtual ports cannot be made); the suite passes.
+  Live: Javier closed G1-Emu with NME connected and it showed "MIDI port gone".
+
+- **A patch loaded from the synth's front panel arrives whole** (2026-09-27,
+  found testing against G1-Emu; Claude). Loading
+  from the panel ended in "Incomplete Patch Load: 0 of 13 sections", and the
+  editor looked disconnected until the deferred fetch caught up. The OS
+  announces such a load with two NewPatchInSlot in a row (pids `0b` then `0c`
+  in the capture); the editor's RequestPatch was answered with the first, the
+  second landed while the 13 GetPatch went out with the first, and the synth
+  answers a GetPatch with a pid the slot no longer has with a bare ACK and no
+  section. Now a newer pid on the slot being fetched restarts the fetch
+  (dropping the GetPatch still queued, `NmProtocol::discardQueued`), a newer
+  pid while the request is unanswered makes the answer ask again, only the
+  RequestPatch answer (ACK `0x36`) starts a fetch, and a stalled fetch whose
+  slot has moved to another pid asks for the patch again instead of the same
+  sections. Verification: a new test replays the captured exchange in both
+  orders (fails without the change); the suite passes. Live: Javier loaded
+  patches from G1-Emu's panel with NME connected and each one arrived.
+
+- **A failed upload, a silent synth and a switch of synths no longer leave the
+  editor pretending** (2026-09-27, found testing against G1-Emu; Claude). Three
+  things the tests turned up, all about the editor believing a slot matched the
+  synth when it did not:
+  - An upload that timed out or was rejected only put a message in the status
+    bar: the slot stayed as if uploaded, with its synchronizer sending edits to a
+    synth slot holding another patch. Now the slot turns LOCAL, its synchronizer
+    goes, the status bar says so, and the MCP log gets an `upload_failed` event
+    (`ConnectionManager::setUploadFailedCallback`).
+  - After such a timeout, or an unanswered patch request, the editor stayed
+    "Connected" to a synth that answered nothing. It now says hello and, if
+    nothing at all comes back within the reply timeout, marks the synth "not
+    responding" (disconnected, port kept open, per-connection state forgotten
+    through the new `forgetSynthState`); it reconnects by itself as soon as the
+    synth speaks again.
+  - Losing the connection now turns every loaded slot LOCAL and drops its
+    synchronizer, and connecting no longer gives a LOCAL slot one. Switching
+    from G1-Emu to the real G1 left slot A showing the emulator's patch, not
+    LOCAL and synced, for the ~3.5 s before the new synth's patch arrived, so an
+    edit then went to the real synth's own patch.
+  - Module names are held to the G1's 16 characters in `Module::setTitle`, the
+    one place every path goes through; renames already were, but a `.pch` with
+    longer names loaded them whole and the synth gave them back cut, so two
+    patches in bank 9 no longer matched their own files.
+  Verification: builds; 2 new test cases (title limit, long name from a file);
+  full suite 121 cases, 2,935 assertions, also under ASan/UBSan. Live against
+  G1-Emu: with the emulator made to hang (G1-Emu's `G1_SINGLEOP_CACHE=1`) the
+  upload timeout gave `upload_failed`, slot A LOCAL and "Synth not responding"
+  3 s later; switching G1-Emu -> real G1 -> G1-Emu showed slot A LOCAL until
+  each synth's patch arrived (no writes to the real G1); the two bank 9 patches
+  now round-trip with no difference.
+
+- **The Synth Settings dialog shows the master tune centred on 0** (2026-09-27). The
+  setting is a signed byte, 0 = in tune, -127 to 127 cents, as nmedit's editor reads
+  it; NME took 64 as the centre, so Javier's G1, at 0 on its own display, showed as
+  -64 cents, and saving the dialog would have detuned it. `SynthSettings` gets
+  `masterTuneCents()`/`setMasterTuneCents()`, the dialog's slider now runs -127..127.
+  Verification: `tests/test_synth_settings_clock.cpp` reads 0 cents from a real reply
+  and round-trips -127, -10, 0, 25 and 127 through the encoder; suite green plain and
+  under ASan/UBSan, the app builds. Javier opened the dialog against his G1 with this
+  build: Master Tune 0, +0 cents, as on the synth's own display.
+
+- **The Synth Settings dialog shows the MIDI clock source the right way round**
+  (2026-09-27). The bit is 1 for Internal and 0 for External, and NME read it the
+  other way: Javier's G1, set to Internal at 100 BPM on its own display, showed as
+  External, and choosing Internal in the dialog stopped the synth's master clock, so
+  every patch clocked by MIDIGlobal (sequencers, arpeggios) fell silent. Found in
+  G1-Emu, whose OS starts the internal clock only on 1 (G1-Emu `NOTES.md`, "The master
+  clock"). `SynthSettings` now says what the bit means (`clockIsInternal()`,
+  `setClockInternal()`), the dialog uses them, and settings not yet read from the
+  synth default to Internal.
+  Verification: `tests/test_synth_settings_clock.cpp` decodes a real settings reply
+  whose bit is 0 as External and round-trips both values through the encoder; the
+  suite passes plain and under ASan/UBSan and the app builds. Javier opened the
+  dialog against his G1 with this build: Internal, 100 BPM, as on the synth's display.
+
+- **The keyboard floater no longer leaves notes stuck on the synth** (2026-09-26,
+  G1-Emu issue #4, "the keyboard floater stacks notes"). The G1's OS takes the
+  editor's note messages as one key, not a keyboard: a press stores its note and
+  sets the key down, a release sets it up without looking at the note, and only the
+  key's changes become note-on and note-off. Two editor notes that overlapped (the
+  floater's repeat and drone modes, or two `play_note` calls from the MCP) left one
+  sounding for ever. Checked on a real G1 with a gate-only test patch, whose gate
+  LED stayed lit after both notes were released; the G1-Emu emulator does the same
+  (G1-Emu `NOTES.md`, "The editor's keyboard is one key"). `ConnectionManager` now
+  sends every editor note through `EditorKey` (`source/midi/EditorKey.h`): a press
+  while another note is down releases that note first, and a release of a note that
+  is no longer down sends nothing. The editor's keyboard stays monophonic, as the
+  synth makes it; chords still need the regular MIDI input.
+  Verification: `tests/test_editor_key.cpp` covers a lone note, a second press,
+  releases in either order, a repeated press and a reset; the suite passes plain and
+  under ASan/UBSan. On the G1-Emu test bench, the sequence it produces for two
+  overlapping notes plays the second note (330 Hz for note 64) and ends silent,
+  where the raw overlap left a note at full level. Not yet tried from the editor
+  against the real synth.
+- **`Ctrl+R` leaves modules excluded from mutation alone** (2026-09-13, reported by
+  Javier). The manual said locked parameters and excluded modules are never
+  touched, but `randomizeSlotParameters` only checked locks, so "Exclude from
+  Mutation" protected a module from the Patch Mutator and the MCP bridge and not from
+  `Ctrl+R` or `Ctrl+Shift+R`. Both now skip excluded modules, and the status bar says
+  how many were left alone, or that nothing was randomized because everything left
+  is excluded. To make the exclusion usable for this: the menu item is now **Exclude
+  from Random & Mutation**, it is also on the right-click menu of a selection (one
+  state for all of it: exclude them all, or include them all again when all already
+  are), and the red frame marking an excluded module is drawn always, not only in
+  Mutator mode. The manual also said `Ctrl+Shift+R` spreads values around the current
+  ones; the code centres them on the middle of each parameter's range, and the manual
+  now says so. Verification: built, full test suite passes (97 test cases); the
+  randomize path and the menus have no unit tests. **Not verified:** on screen.
+
+- **A store to a bank no longer gets lost when it follows an upload** (2026-09-13).
+  Storing a patch uploads it first and sends the store as soon as the synth ACKs
+  the upload, and that store went out raw, without waiting for an answer. Of four
+  stores in a row made over the MCP bridge, one never reached the bank, with no
+  error on either side: only the synth's bank list, fetched again, showed the gap.
+  The store now goes through the ACK queue, as `storeLoadedSlotToBank` already did.
+  Verification: the missing patch was stored again, and all four positions read
+  back from a patch list fetched fresh after reconnecting. The failure depends on
+  timing and was seen once, so this is the likely cause, not a reproduced one.
+
+- **The bank list follows a store** (2026-09-13). The editor fetches the synth's
+  patch names once, on connect, and a store never updated them, so the patch
+  browser and `list_bank` went on showing the stored position as empty, or under
+  its old name, until the next connection. The stored name is now written into the
+  list and the browser is refreshed. Built and tested, not yet seen on screen.
+
+- **Undoing a morph assignment no longer leaves it drawn on the knob** (2026-09-13).
+  A morph is held twice: in the patch's assignment list, which is what is saved and
+  sent, and in each parameter's own group and range, which is what the canvas and
+  the inspector draw. The canvas copied the list into the parameters only when a
+  patch was set, and the undo actions touched only the list, so Ctrl+Z took the
+  morph out of the patch but left it drawn until the patch was reloaded. The actions
+  now update both. Found by reading the code while adding the MCP morph tools, which
+  set nothing on the parameter themselves. `tests/test_morph_assign_action.cpp` covers
+  assign, range change, undo and redo; not yet checked on screen.
+
+- **A failed backup no longer destroys the good one** (S2, 2026-09-12). Backing up
+  all banks deleted every `.pch` in `Bank1`-`Bank9` before fetching a single patch,
+  so a synth that stopped answering halfway through, a cancelled run or a
+  disconnect left you with neither the new backup nor the old one. The download
+  now goes to a staging folder beside the mirror, and the bank folders are
+  replaced only once every patch has been fetched, parsed and written. Anything
+  short of that (a failure, a timeout, a cancellation, a disconnect, or items
+  never reached) discards the staged copy and leaves the previous backup exactly
+  as it was, reporting that it was kept. If the move itself fails, the complete
+  staged copy is kept rather than thrown away and its path is logged.
+  Mirror semantics are unchanged but now applied at publication, so patches
+  deleted on the synth still drop out of a backup that completed. An all-banks
+  backup also refuses to start without a loaded patch list: every position would
+  read as empty, which is how an empty mirror could replace a good one. The
+  dialog's warning has been rewritten to say what now happens.
+  Verification: `tests/test_bank_backup_safety.cpp` covers the two refusals,
+  asserting the existing files and their contents survive untouched and no
+  staging is left behind. Cancellation, mid-download disconnect, a partial fetch
+  and a publication failure are **not** covered by tests: they need a patch list
+  on the connection, which needs the injectable seam T1 calls for. Those paths
+  rest on the staging design and still need hardware testing.
+
+- **A patch loaded from disk goes to the slot you chose, with its own contents**
+  (S3, 2026-09-11). The upload was deliberately addressed to the destination slot,
+  but 200 ms later it read `currentPatch()`, which follows the focused tab. Switch
+  tabs inside that window and the patch you had just switched to was uploaded into
+  the slot the file was meant for, silently overwriting it. The delayed upload now
+  addresses that slot's own patch, and a per-slot generation counter drops it
+  entirely if the slot was loaded again, replaced by New Patch or filled from the
+  synth in the meantime. The Patch Settings dialog had the same mismatch twice
+  over: it applied its result to whichever patch had focus when the dialog closed
+  and uploaded it to whichever slot the synth was looking at. It is now bound to
+  the slot it was opened on, and does nothing if that patch is gone.
+
+- **Adding a module sends its custom values** (S7, 2026-09-11). The synchronizer
+  always passed an empty CustomDump, so OscA's frequency-display unit, the note
+  sequencers' steps and every other custom control arrived at the synth as
+  whatever default it chose for itself. The values are now collected in
+  descriptor order, zeros included: the dump is positional, so a skipped zero
+  shifts every later value. The encoder and its byte-for-byte agreement with
+  jnmprotocol's reference OscA packet were already right and already tested; only
+  the caller was empty. This was reported fixed in 0.18.0 and was not: the change
+  was never committed and the release shipped without it.
+  Verification: `tests/test_synchronizer_new_module.cpp` drives the real
+  synchronizer against a real patch and the real descriptors, recording the frames
+  off the protocol instead of a MIDI port, and checks OscA (one custom value) and
+  NoteSeqB (two). Confirmed to fail without the fix. This has nothing to do with
+  the G1 freezing when an oscillator was added: that was the corrupt patch left
+  by an incremental `DeleteModule`, fixed and hardware-tested in 0.18.0. What
+  was missing here is simply that the synth chose its own defaults for a new
+  module's custom controls. Not yet exercised on hardware.
+
+- **Disconnecting cancels the old MIDI session, not just its ports** (S1,
+  2026-09-11). The protocol's sender captured a destroyed `MidiDeviceManager`,
+  so a queued request drained after its timeout through freed memory. Detaching
+  or replacing the sender now clears the queue and reply wait; input callbacks
+  already posted to the message thread are invalidated before the ports close.
+- Connection-owned ACK/parameter queues, partial downloads, bank locations and
+  one-shot completion callbacks are cleared on disconnect. Delayed operations
+  use a fresh cancellation flag per session, preventing settings/list requests
+  and upload completions from crossing a reconnect. The settings-readback timer
+  also had an unguarded `this` capture, reproduced under ASan before the fix.
+  An interrupted upload still sends its terminating packet before detaching;
+  an outstanding bank-upload callback receives failure once, never stale success.
+- **MIDI lifetime regressions now run in the normal test target.** Immediate and
+  queued sends share the existing transport callback, allowing frame recording
+  and simulated replies without opening MIDI ports. Ten new test cases cover
+  teardown, timeout, reconnect, queue cancellation and upload completion.
+  Verification: full Linux Debug app build succeeded (existing warnings remain);
+  all 75 cases / 2,153 assertions pass in Debug and ASan/UBSan, including five
+  consecutive sanitizer runs with DISPLAY and WAYLAND_DISPLAY unset.
+  Real port-open failure/reconnect and G1/platform smoke tests remain pending;
+  no hardware was operated and no new release was published.
+
+### Documentation
+
+- Added [the post-0.18.0 development plan](docs/POST_0180_PLAN.md): seven safety
+  findings with regression criteria, integration/performance work, session recovery,
+  patch and bank version history, library tags/favourites, comparison and MCP.
+  The proposed release sequence is linked from the roadmap; the August plan is
+  retained as historical context. This is planning only, not shipped functionality.
+
+## 0.18.0 — 2026-09-10
+
+### Added
+
+- **Note sequencer steps can read as note names** (#76). A new **Read sequencer steps as
+  note names** in Editor Options changes what a step says wherever a value is shown: hovering
+  it, dragging it, the F5 overlay and the Inspector, which also accepts what it shows, so a
+  NoteSeqB step can be set by typing `C4`. NoteSeqB reads absolute pitches on the same
+  60 = C4 its piano roll is drawn around; NoteSeqA's steps are a bipolar control value whose
+  zero is 64 and which only become a pitch once they reach an oscillator, so they read as the
+  interval they transpose by: `0`, `+7 (G)`, `-1 (B)`. Off by default, and the editor's
+  setting rather than the patch's: the note sequencers have no room left in the G1's patch
+  format for a preference of their own.
+
+- **Dragging a note in NoteSeqB's piano roll says which note it landed on** (#76). Every
+  other parameter edit puts its value on screen while the mouse is down; the one gesture that
+  sets notes did not. The badge appears over the step's own arrow button, so it reads in
+  whichever of the two units the setting above asks for.
+
+- **The Inspector marks the preset it recalled, and the arrows walk them**
+  ([#60](https://github.com/animatek/Animatek-NME/issues/60)). Recalling a preset changed
+  the module and left no trace of which one it had been, so a list of eight was eight
+  identical rows and no way back to the one you liked. The recalled row is now marked, and
+  with the list focused the up and down keys walk the presets **recalling each as they pass
+  it** — the gesture wanted here is auditioning, not selecting and then confirming. They
+  walk the visible rows, so a collapsed Factory folder is skipped by the arrows exactly as
+  it is skipped by the eye, and the chosen row scrolls into view if it falls outside it.
+  Nothing wraps.
+
+- **Arrows to step through the disk preset browser**
+  ([#60](https://github.com/animatek/Animatek-NME/issues/60)). Every preset asked for a
+  double click, so auditioning a folder meant going back to the mouse for each file. Two
+  arrows beside the counter load the previous and next entry outright, and in the list the
+  arrow keys plus `Enter` do the same without leaving the keyboard. They walk the
+  **visible** entries, so the search box and the type filters bound them exactly as they
+  bound the list. Nothing wraps: the arrow greys out at either end, which on a long library
+  is what is meant.
+
+### Fixed
+
+- **An orphaned LED no longer stays lit for good.** The sweep for dangling assignments
+  dropped them from the model and stopped there: the synth still held the assignment and
+  still had its LED on, and the editor no longer knew it existed, so no delete and no
+  upload could ever reach it. Caught on "DRUM VICIUS": the patch arrived with an assignment
+  dangling off Knob 16, the sweep threw it away, and deleting the modules sent deassigns
+  for knobs 1-15 and 18 — not 16, because it was no longer in the model. The sweep now
+  reports which knobs and which MIDI CCs it dropped, and installing a patch that came from
+  the synth deassigns each of them.
+
+- **Replacing a slot's patch no longer reads freed memory.** All four paths that destroy a
+  patch — the one arriving from the synth, the MCP bridge's `replacePatchInSlot`, New
+  Patch, and opening a `.pch` — detached the Inspector with `clearModule()`, which **keeps**
+  its own patch pointer and re-arms the assignments list with it: the very patch the next
+  line destroys. `clearSnapshots()` then walks that list and reads freed memory. It survived
+  only because the freed container's module slots read back as null. They now detach with
+  `setPatch(nullptr)`, the one call that drops both pointers; all four re-point at the
+  incoming patch further down, as they already did. The crash this caused has been covered
+  since #61, but the use-after-free underneath it had not been touched.
+
+- **Deleting several modules at once puts their LEDs out, not just deleting them one by
+  one.** The knob lights do not follow the patch: they move only for the incremental
+  assign and deassign messages, and both are resolved against the patch the synth holds at
+  that moment. A `deassign` lands if the synth still has the module the knob pointed at and
+  if it is addressed to the current patch. Deleting a selection runs the actions back to
+  back in a single pass, and one incremental `DeleteModule` or `DeleteCable` let out
+  mid-pass was enough to move the synth's patch on: every deassign still to go was
+  addressed to a patch that no longer existed, and the synth dropped it. Which is why one
+  at a time worked and all at once did not. **Every** delete is now suppressed and synced
+  by one full upload, even one that frees nothing: with nothing let out during the pass the
+  synth's patch and its id hold still, and every deassign is valid. Knob assignment changes
+  do not move the id themselves — the synth ACKs them with it unchanged.
+
+- **An upload states only what the patch holds.** Blanket-deassigning the rest from there
+  achieved nothing: after an upload that removed modules, the assignment the message names
+  is already gone, the synth has nothing to act on, and the LED stays lit anyway. Putting a
+  light out is the delete's job, before the module goes; lighting one is the upload's, once
+  the synth has the module.
+
+- **Deleting a module no longer leaves its assignments on the synth.** The editor's model
+  did drop the deleted module's morphs, knobs and MIDI CCs, but there is no way in the
+  protocol to unassign a morph, so an incremental `DeleteModule` left the synth's morph and
+  knob maps naming the module that had just gone. Re-reading the patch brought those
+  leftovers back into the editor and into the saved `.pch`: the patch was corrupt, and the
+  rubbish latched onto whatever module landed on that index next. That is where the G1
+  froze when an oscillator was added. A module that carried assignments is now synced by a
+  full upload, which rewrites both maps; it is debounced and coalesced, so deleting a whole
+  selection sends one. A module with no assignments keeps the cheap incremental path.
+
+- **A patch coming in is swept of orphaned assignments.** Every morph, knob and MIDI CC
+  naming a module the patch does not have is discarded as it is read, from the synth or
+  from a `.pch`. An already corrupted patch therefore heals when it is opened, instead of
+  carrying the leftovers into the next upload. Section 2, the morph section, is left alone:
+  its module is not in a voice area's list and always exists.
+
+- **NewModule's pid fits in its six bits.** `PatchPacket := 0:1 command:1 pid:6`:
+  NewModule is the only edit message on cc=0x1f, and so the only one whose pid is six bits
+  wide — move, delete, rename and the cables all ride cc=0x17, where it gets seven. It was
+  masked with `0x7F` both when the message was built and when the pid was rewritten in the
+  send queue, so a pid of 64 or more raised the `command` bit, which is what marks a bulk
+  upload stream (`UploadPacketizer::frame`), and the synth would have read the packet as
+  something else entirely.
+
+- **An unanswered PatchPacket closes its transfer.** When an acked-queue message on
+  cc=0x1c-0x1f runs out its three seconds with no reply, the empty terminating packet goes
+  out. The synth stays in bulk-receive state until it sees a packet flagged `last`, and
+  there it stops answering anything at all (issue #40): the close gets it back without a
+  power cycle.
+
+- **Adding an OscA carries its custom values in the SysEx.** The synchronizer always sent
+  an empty CustomDump, leaving out OscA's frequency-display unit and every other module's
+  custom settings. NewModule now keeps the protocol's eight-bit fields and respects the
+  sixteen-character limit without the extra NUL that shifted the sections along. Verified
+  byte for byte against jnmprotocol's reference OscA packet.
+
+- **No patch and an empty patch no longer look the same** (#75). Starting the editor with
+  the synth off left you looking at the working canvas, grid and all, under "Press Enter to
+  add modules", which is an instruction that cannot be followed: there is nothing to add the
+  module to. Without a patch the canvas now goes flat, drops its grid and its grain, and says
+  "No patch open" over the two keys that make one.
+
+- **NoteSeqB's note arrows line up with the steps they belong to** (#76). The piano roll kept
+  a 16px piano-key strip down its left side, so its sixteen steps were squeezed into the
+  remaining width while the arrow buttons below stayed on the module's own 12px grid: every
+  arrow pointed at roughly the step after the one above it, and the key strip itself read as
+  an extra empty first step. The strip is gone and the steps fill the display, one per arrow.
+  The black-key lanes still mark the pitches.
+
+- **Loop starts on in NoteSeqA and NoteSeqB**, as it does in the original editor. Both sat at
+  off on a freshly added module.
+
+- **The Vocoder's buttons can be read again** (#77). Mon, INV, Rnd and the five shift buttons
+  are cyclic buttons 20px and under, which put them down the path meant for the single-letter
+  mute and bypass toggles: it squares the button off to 13x13, so INV lost its I and Rnd came
+  out as "...". That shape is now only used where the face is an icon or one letter, and any
+  label too wide for its button shrinks to fit instead of being handed to the ellipsis. Mon
+  also keeps its name in both states rather than reading "Off" when off.
+
+- **The Vocoder's Rnd leaves the output gain alone** (#77). It shuffled every parameter on the
+  module that was not a switch, the output level with them. It is declared in the theme as a
+  call on the routing display, so it now moves what that display shows: the 16 analysis bands.
+  FilterBank's Rnd, which is declared on the module, still takes the whole module.
+
+- **`+` and `-` step the arrow-pair controls** (#76, #77). The keys looked for a knob or a
+  slider under the pointer, so the controls that are already a pair of arrows, the Vocoder's
+  bands and NoteSeqB's notes, had nothing to step; NoteSeqA, which has sliders, worked. The
+  arrows are now targets like anything else, without a second floating pair appearing over
+  them.
+
+- **The numeric keypad's minus steps and zooms out.** Its plus always worked. JUCE's X11 layer
+  folds the keypad onto the main keyboard before a component sees the key, and it folds
+  KP_Subtract onto the soft hyphen rather than the ASCII one, so the code that arrived matched
+  nothing. This was true of every knob and slider, not just the new arrow targets.
+
+- **NoteSeqB's Gclk output is spelled the way NoteSeqA spells it** (#76). It read "Gclck".
 
 - **A synth switched on after the editor connects on its own again** (#73). Starting the editor
   with the synth off sent the editor's hello into a dead cable, and the only route from
@@ -19,6 +1689,14 @@
   a Patreon link; it now lists the backers on the 5 EUR tier and above by the name they use on
   Patreon, alphabetically, with no ranking by amount and nothing else from the membership export.
   Kept in `data/credits.txt`, so it is one file to update per release.
+
+- **The mixers' input knobs are named "In level" rather than "In sense"** (#78). Clavia's own
+  documentation calls them attenuation controls and never uses "sense", which came from the
+  community's reverse-engineered parameter dump along with NoteSeqA's "active" above;
+  EqMid and EqShelving already called the same kind of control an in level. The name is only
+  ever seen in the Inspector, the hover badge and the right-click menus, since the knobs carry
+  no label on the panel. The MCP bridge's `set_parameter` still accepts the old name, so a
+  script that used it keeps working.
 
 ## 0.17.0 — 2026-08-19
 
@@ -1415,4 +3093,3 @@ people for the first time in 0.15.0.*
 - Undo/redo system for patch editing.
 - QuickAdd, multi-selection, copy/paste, duplicate, cable tools, zoom, randomize, initialize, parameter locks, and snapshots.
 - Help system and About/Help links.
-

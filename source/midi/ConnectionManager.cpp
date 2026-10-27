@@ -4,6 +4,8 @@
 #include "../protocol/SetPatchTitleMessage.h"
 #include "../protocol/SetModuleTitleMessage.h"
 #include "../protocol/SendControllerSnapshotMessage.h"
+#include "../protocol/KnobAssignmentMessage.h"
+#include "../protocol/MidiCtrlAssignmentMessage.h"
 #include "../model/PatchSerializer.h"
 #include "../model/Patch.h"
 #include <iostream>
@@ -58,18 +60,6 @@ const char* pdlSectionName(int type)
         case 101: return "MorphMap";
         case 105: return "NoteDump";
         default:  return "Unknown";
-    }
-}
-
-const char* synthErrorName(int code)
-{
-    switch (code)
-    {
-        case 3:  return "non-fatal patch message warning";
-        case 4:  return "checksum error";
-        case 5:  return "no slot focused";
-        case 6:  return "non-fatal patch message warning";
-        default: return "unknown";
     }
 }
 
@@ -185,14 +175,19 @@ int classifyGetPatchReply(const std::vector<uint8_t>& entry)
 ConnectionManager::ConnectionManager()
 {
     protocol.addListener(this);
+    protocol.onRawIncoming = [this](const uint8_t* data, size_t length)
+    {
+        if (onRawSysEx)
+            onRawSysEx(data, length);
+    };
 }
 
 ConnectionManager::~ConnectionManager()
 {
-    *alive = false;   // Cancel any pending Timer::callAfterDelay lambdas
     protocol.stopTimer();
     protocol.removeListener(this);
     disconnect();
+    *alive = false;
 }
 
 bool ConnectionManager::connect(const juce::String& inputId, const juce::String& outputId)
@@ -207,6 +202,11 @@ bool ConnectionManager::connect(const juce::String& inputId, const juce::String&
         setStatus(State::Disconnected, "Failed to open MIDI ports");
         return false;
     }
+
+    midiDevice->setPortsGoneCallback([this](const juce::String& ports) {
+        std::cout << "[MIDI] Port gone: " << ports << " - disconnecting" << std::endl;
+        disconnect("MIDI port gone: " + ports);
+    });
 
     setStatus(State::Connecting, "Connecting...");
     sendHandshake();
@@ -243,6 +243,8 @@ void ConnectionManager::sendHandshake()
 // state.
 void ConnectionManager::onSynthMessage(int cc)
 {
+    lastHeardMs = juce::Time::getMillisecondCounter();
+
     if (cc == NmCmd::IAm || status.state == State::Connected || midiDevice == nullptr)
         return;
 
@@ -256,13 +258,42 @@ void ConnectionManager::onSynthMessage(int cc)
     startHandshakeTimeout();
 }
 
-void ConnectionManager::disconnect()
+// Everything learnt from, or pending with, the synth on this connection. A
+// disconnect forgets it, and so does a synth that stops answering (the port
+// stays open for it to come back), so a later connection starts clean either way.
+void ConnectionManager::forgetSynthState(const char* _why)
 {
     cancelHandshakeTimeout();
-    invalidateParamQueue("disconnect");
+    invalidateParamQueue(_why);
+    editorKey.reset();
+    waitingForPatchAck = false;
     collectingSections = false;
+    ++patchTimeoutGeneration;
+    patchRequestAttemptsLeft = 0;
+    sectionAccumulator.clear();
+    patchSections.clear();
+    sectionsReceived = 0;
+    sectionSeen.fill(false);
+    fetchPatchId = -1;
+    sectionRetriesLeft = 0;
+    patchFetchCompleteCallback = nullptr;
+    flashDumpCallback = nullptr;
+    flashDumpAccumulator.clear();
+
+    ackedQueue.clear();
+    ackedQueueWaiting = false;
+    ackedQueueWaitingAllowsNewPatchInSlot = false;
+    ++ackedQueueGeneration;
+    pendingSyncEchoes_ = 0;
+    suppressNewPatchInSlot_ = false;
+    suppressNextAutoFetch = false;
+
     pendingBankLoadSlot = -1;
     pendingBankLoadGeneration++;
+    lastLoadedSection = lastLoadedPosition = -1;
+    suppressNextLocationClear = false;
+    for (int slot = 0; slot < 4; ++slot)
+        clearSlotBankLocation(slot);
     slotDetected = false;
     slotDetectGeneration++;
     // Slot state can change while we're away — relearn it on reconnect
@@ -270,7 +301,14 @@ void ConnectionManager::disconnect()
     slotEnabled.fill(false);
     slotPinned.fill(false);
     slotPatchIds.fill(0);
+    currentPatchId = 0;
     slotModelDelivered.fill(false);
+    autoFetchPending.fill(false);
+    fetchingPatchList = false;
+    patchListLoaded = false;
+    ++patchListGeneration;
+    patchListNames.clear();
+    lastListCancelMs = 0;
     patchListInterruptedByFetch = false;
     slotPrefetchQueue.clear();
     backgroundPrefetchSlot = -1;
@@ -279,21 +317,38 @@ void ConnectionManager::disconnect()
     // synth stays parked waiting for the rest of a transfer that will never
     // arrive and answers no MIDI at all afterwards (issue #40).
     if (waitingForUploadAck)
-    {
-        ++uploadAckGeneration;
-        closeUploadTransfer("disconnect");
-        waitingForUploadAck = false;
-        uploadPackets.clear();
-        uploadPacketIndex = 0;
-    }
+        closeUploadTransfer(_why);
 
+    ++uploadAckGeneration;
+    waitingForUploadAck = false;
+    uploadWaitsForEditAck = false;
+    uploadPackets.clear();
+    uploadPacketIndex = 0;
+    uploadKnobAssignments.clear();
+    uploadCtrlAssignments.clear();
+    uploadCompleteCallback = nullptr;
+}
+
+void ConnectionManager::disconnect(const juce::String& reason)
+{
+    *alive = false;
+    alive = std::make_shared<std::atomic<bool>>(true);
+    auto bankUploadAborted = std::move(bankUploadResultCallback);
+    bankUploadResultCallback = nullptr;
+
+    forgetSynthState("disconnect");
+    updateMode = false;
+
+    protocol.setSendFunction({});
     if (midiDevice)
     {
         midiDevice->disconnect();
         midiDevice.reset();
     }
 
-    setStatus(State::Disconnected, "Disconnected");
+    setStatus(State::Disconnected, reason);
+    if (bankUploadAborted)
+        bankUploadAborted(false);
 }
 
 juce::Array<juce::MidiDeviceInfo> ConnectionManager::getAvailableInputDevices()
@@ -309,8 +364,22 @@ juce::Array<juce::MidiDeviceInfo> ConnectionManager::getAvailableOutputDevices()
 void ConnectionManager::onIAmReceived(const IAmMessage& msg)
 {
     // sender=1 means the synth is responding
+    if (msg.sender == 1 && msg.updateMode)
+    {
+        // Its boot ROM's update utility (Shift + Store at power-on): it waits for an OS and
+        // takes nothing else, so the opening sequence would only time out. Not connected.
+        cancelHandshakeTimeout();
+        if (! updateMode)
+            std::cout << "[SYNTH] The synth is in its update mode, waiting for an OS" << std::endl;
+        updateMode = true;
+        if (status.state == State::Connected)
+            forgetSynthState("synth in update mode");
+        setStatus(State::Disconnected, "Synth in update mode (Device > Update Synth OS...)");
+        return;
+    }
     if (msg.sender == 1)
     {
+        updateMode = false;
         // The G1 does not only answer an IAm, it announces itself, over and
         // over: the dumps on issue #73 settle into one every three seconds for
         // as long as the synth is on, with nothing asked of it. Every one of
@@ -339,9 +408,13 @@ void ConnectionManager::onIAmReceived(const IAmMessage& msg)
 
         status.synthVersionHigh = msg.versionHigh;
         status.synthVersionLow = msg.versionLow;
+        status.synthModel = msg.model();
+        if (status.synthModel == SynthModel::Micro)
+            std::cout << "[SYNTH] A Micro Modular answered (device byte 2): one slot, one DSP" << std::endl;
 
         setStatus(State::Connected,
-                  "Connected: Nord Modular v" +
+                  juce::String(status.synthModel == SynthModel::Micro ? "Connected: Nord Micro Modular v"
+                                                                      : "Connected: Nord Modular v") +
                   juce::String(msg.versionHigh) + "." +
                   juce::String(msg.versionLow));
 
@@ -411,6 +484,7 @@ void ConnectionManager::sendPatchRequest(int slot)
             ackedQueue.clear();
             ackedQueueWaiting = false;
             ackedQueueWaitingAllowsNewPatchInSlot = false;
+            uploadWaitsForEditAck = false;
         ++ackedQueueGeneration;
     }
 
@@ -424,8 +498,14 @@ void ConnectionManager::sendPatchRequest(int slot)
     sectionsReceived = 0;
     sectionSeen.fill(false);
     fetchPatchId = -1;
+    fetchSuperseded = false;
     sectionRetriesLeft = maxSectionRetries;
     patchTimeoutGeneration++;  // Invalidate any pending timeout
+
+    // Section requests of a fetch this one replaces would only be answered
+    // with bare ACKs (wrong pid), each one holding the wire for a round trip.
+    protocol.discardQueued(getPatchTag);
+    protocol.discardQueued(getPatchCommonTag);
 
     RequestPatchMessage req;
     req.slot = slot;
@@ -469,6 +549,7 @@ void ConnectionManager::sendPatchRequest(int slot)
         setStatus(State::Connected,
                   "Synth did not answer the patch request for slot "
                       + juce::String::charToString(static_cast<juce::juce_wchar>('A' + (slot & 0x03))));
+        checkSynthStillAnswers("a patch request went unanswered");
     });
 
     DBG("Requesting patch from slot " + juce::String(slot));
@@ -576,6 +657,23 @@ void ConnectionManager::setSlotEnabled(int slot, bool enabled)
               << (enabled ? " pinned" : " unpinned") << ")" << std::endl;
 }
 
+bool ConnectionManager::setSlotPins(const std::array<bool, 4>& pinned)
+{
+    if (!isConnected())
+        return false;
+    if (!slotEnableMaskKnown)
+    {
+        requestSynthSettings();
+        return false;
+    }
+
+    slotPinned = pinned;
+    sendSlotMask();
+    std::cout << "[SLOT] Sent SlotsSelected (set pins "
+              << pinned[0] << pinned[1] << pinned[2] << pinned[3] << ")" << std::endl;
+    return true;
+}
+
 void ConnectionManager::loadPatchFromBank(int section, int position, int targetSlot)
 {
     if (!isConnected())
@@ -667,6 +765,43 @@ void ConnectionManager::closeUploadTransfer(const char* reason)
     sendRawSysEx(UploadPacketizer::closeTransferFrame(uploadSlot));
 }
 
+// The knob and MIDI-CC lights on the front panel only follow the incremental
+// assign/deassign messages, never a patch upload -- the upload rewrites the maps
+// inside the patch and leaves every LED exactly as it was.
+//
+// Only what the patch holds is stated. Blanket-deassigning the rest from here
+// does nothing: both messages are resolved against the patch the synth has, and
+// after an upload that removed a module the assignment they name is already
+// gone, so the synth has nothing to act on and the LED stays lit. Freeing a
+// light is the delete's job, before the module goes; lighting one is this one's,
+// after the synth has the module.
+void ConnectionManager::replayPanelAssignments()
+{
+    if (!isConnected() || (uploadKnobAssignments.empty() && uploadCtrlAssignments.empty()))
+    {
+        uploadKnobAssignments.clear();
+        uploadCtrlAssignments.clear();
+        return;
+    }
+
+    const int slot = uploadSlot & 0x03;
+    const int pid = getPatchId(slot);
+
+    for (const auto& a : uploadKnobAssignments)
+        sendRawSysEx(KnobAssignmentMessage::assign(pid, a.index, a.section,
+                                                   a.module, a.param, slot));
+    for (const auto& a : uploadCtrlAssignments)
+        sendRawSysEx(MidiCtrlAssignmentMessage::assign(pid, a.index, a.section,
+                                                       a.module, a.param, slot));
+
+    std::cout << "[UPLOAD] Panel assignments replayed: "
+              << uploadKnobAssignments.size() << " knob(s), "
+              << uploadCtrlAssignments.size() << " MIDI CC(s)" << std::endl;
+
+    uploadKnobAssignments.clear();
+    uploadCtrlAssignments.clear();
+}
+
 void ConnectionManager::sendNextUploadPacket()
 {
     int total = static_cast<int>(uploadPackets.size());
@@ -678,9 +813,9 @@ void ConnectionManager::sendNextUploadPacket()
         // Notify the bank transfer (if one is running) or MainComponent
         if (bankUploadResultCallback)
         {
-            auto cb = std::move(bankUploadResultCallback);
-            bankUploadResultCallback = nullptr;
-            juce::MessageManager::callAsync([cb]() { cb(true); });
+            uploadKnobAssignments.clear();
+            uploadCtrlAssignments.clear();
+            notifyBankUploadResult(true);
         }
         else
         {
@@ -689,10 +824,15 @@ void ConnectionManager::sendNextUploadPacket()
             // they push disk files, not the editor model.)
             slotModelDelivered[static_cast<size_t>(uploadSlot & 0x03)] = true;
 
+            replayPanelAssignments();
+
             if (uploadCompleteCallback)
             {
                 auto cb = uploadCompleteCallback;
-                juce::MessageManager::callAsync([cb]() { cb(); });
+                auto aliveFlag = alive;
+                juce::MessageManager::callAsync([cb, aliveFlag]() {
+                    if (*aliveFlag) cb();
+                });
             }
 
             resumePatchListIfInterrupted();
@@ -705,7 +845,9 @@ void ConnectionManager::sendNextUploadPacket()
         // currentPatch is already authoritative — it IS the patch we just uploaded.
         // Re-fetching would replace it with a synth copy that may not include
         // morph assignments (the synth's working-slot memory may strip them).
-        suppressNextAutoFetch = true;
+        // A bank upload puts nothing in a slot, so no NewPatchInSlot follows it.
+        if (!uploadToBank)
+            suppressNextAutoFetch = true;
         return;
     }
 
@@ -740,34 +882,110 @@ void ConnectionManager::sendNextUploadPacket()
                           : "(unknown)")
                       << ", aborting upload" << std::endl;
             waitingForUploadAck = false;
-            invalidateParamQueue("upload timeout", uploadSlot);
+            if (!uploadToBank)
+                invalidateParamQueue("upload timeout", uploadSlot);
             closeUploadTransfer("ACK timeout");
             uploadPackets.clear();
             uploadPacketIndex = 0;
-            setStatus(State::Connected, "Upload timeout at packet " + juce::String(sentPacket));
+            const juce::String reason = "Upload timeout at packet " + juce::String(sentPacket);
+            setStatus(State::Connected, reason);
+            notifyUploadFailed(reason);
 
             if (bankUploadResultCallback)
-            {
-                auto cb = std::move(bankUploadResultCallback);
-                bankUploadResultCallback = nullptr;
-                juce::MessageManager::callAsync([cb]() { cb(false); });
-            }
+                notifyBankUploadResult(false);
+
+            checkSynthStillAnswers("the upload timed out");
         }
+    });
+}
+
+void ConnectionManager::notifyUploadFailed(const juce::String& reason)
+{
+    if (!uploadFailedCallback)
+        return;
+    auto cb = uploadFailedCallback;
+    const int slot = uploadSlot & 0x03;
+    auto aliveFlag = alive;
+    juce::MessageManager::callAsync([cb, slot, reason, aliveFlag]() {
+        if (*aliveFlag) cb(slot, reason);
+    });
+}
+
+// A timeout alone does not say whether the synth is gone or only missed one
+// message, and staying "Connected" to a synth that answers nothing hides it:
+// every later edit and request just times out in turn (seen when G1-Emu hung
+// after a run of uploads). So ask: a hello costs nothing on a synth that is
+// connected (its answer is ignored there, see onIAmReceived), and anything the
+// synth says within the reply timeout - the answer, a light frame, a voice
+// count - proves it is still there. Silence means it is not, and the state says
+// so; onSynthMessage reconnects on its own as soon as it speaks again.
+void ConnectionManager::checkSynthStillAnswers(const juce::String& after)
+{
+    if (!isConnected())
+        return;
+
+    const auto askedMs = juce::Time::getMillisecondCounter();
+    sendHandshake();
+
+    auto aliveFlag = alive;
+    juce::Timer::callAfterDelay(NmProtocol::timeoutMs, [this, askedMs, after, aliveFlag]() {
+        if (!*aliveFlag || !isConnected())
+            return;
+        if (static_cast<juce::int32>(lastHeardMs.load() - askedMs) >= 0)
+            return;
+
+        std::cout << "[SYNTH] No answer at all after " << after
+                  << ": marking the synth as not responding" << std::endl;
+        if (bankUploadResultCallback)
+            notifyBankUploadResult(false);
+        forgetSynthState("synth not responding");
+        setStatus(State::Disconnected, "Synth not responding (" + after + ")");
+    });
+}
+
+void ConnectionManager::notifyBankUploadResult(bool success)
+{
+    // Keep the one-shot callback installed until delivery, so a disconnect in
+    // between can finish the bank operation as failed instead of stranding it.
+    auto aliveFlag = alive;
+    const int generation = uploadAckGeneration;
+    juce::MessageManager::callAsync([this, aliveFlag, generation, success]() {
+        if (!*aliveFlag || generation != uploadAckGeneration) return;
+        auto cb = std::move(bankUploadResultCallback);
+        bankUploadResultCallback = nullptr;
+        if (cb) cb(success);
     });
 }
 
 void ConnectionManager::uploadPatch(int slot, const Patch& patch)
 {
+    startUpload(slot, patch, -1, 0);
+}
+
+// Clavia's editor sends its bank packets with slot 0 in the header, and the
+// PatchName section says where the patch goes. Nothing about the slots changes.
+void ConnectionManager::uploadPatchToBank(int section, int position, const Patch& patch)
+{
+    startUpload(0, patch, juce::jlimit(0, 8, section), juce::jlimit(0, 98, position));
+}
+
+void ConnectionManager::startUpload(int slot, const Patch& patch, int bankSection, int bankPosition)
+{
     if (!isConnected())
         return;
 
-    // Not authoritative again until every section is ACKed.
-    if (slot >= 0 && slot < 4)
-        slotModelDelivered[static_cast<size_t>(slot)] = false;
+    const bool toBank = bankSection >= 0;
 
-    // The full upload supersedes all parameter deltas for the previous synth
-    // patch — for this slot only, other slots' queued edits are unaffected.
-    invalidateParamQueue("full patch upload", slot);
+    if (!toBank)
+    {
+        // Not authoritative again until every section is ACKed.
+        if (slot >= 0 && slot < 4)
+            slotModelDelivered[static_cast<size_t>(slot)] = false;
+
+        // The full upload supersedes all parameter deltas for the previous synth
+        // patch — for this slot only, other slots' queued edits are unaffected.
+        invalidateParamQueue("full patch upload", slot);
+    }
 
     // Don't interleave the upload with the patch list request stream.
     cancelPatchListFetch("patch upload supersedes it");
@@ -781,15 +999,20 @@ void ConnectionManager::uploadPatch(int slot, const Patch& patch)
         std::cout << "[UPLOAD] Clearing edit queue (" << ackedQueue.size()
                   << " pending messages discarded)" << std::endl;
         ackedQueue.clear();
-        ackedQueueWaiting = false;
-        // Bump generation so any in-flight timeout lambda is invalidated
-        ++ackedQueueGeneration;
+        // The edit already sent cannot be called back: the synth is working on it
+        // and its ACK is on the way. Sent now, the first packet took that ACK for
+        // its own, the second went out while the synth was still on the first, and
+        // the synth rejected the upload (code 3) - adding modules and deleting them
+        // fast, issue #63, at once with an emulator whose ACKs come late. The
+        // upload waits for that ACK, or for its timeout, which stay armed.
+        if (ackedQueueWaiting)
+            uploadWaitsForEditAck = true;
     }
 
     // Serialize the patch into individual PDL2 sections in the Java upload order,
     // then lay them end to end and chop the result into packets the synth accepts.
     PatchSerializer serializer;
-    auto sections = serializer.serializeForUpload(patch);
+    auto sections = serializer.serializeForUpload(patch, bankSection, bankPosition);
 
     std::vector<std::string> labels;
     labels.reserve(sections.size());
@@ -798,12 +1021,31 @@ void ConnectionManager::uploadPatch(int slot, const Patch& patch)
 
     uploadPackets = UploadPacketizer::cut(sections, labels);
 
+    // Kept aside for the replay once the synth has the modules (see
+    // replayPanelAssignments): the upload alone leaves the panel's lights where
+    // they were.
+    uploadKnobAssignments.clear();
+    uploadCtrlAssignments.clear();
+    for (int k = 0; k < 23 && !toBank; ++k)
+    {
+        const auto& ka = patch.knobAssignments[static_cast<size_t>(k)];
+        if (ka.assigned)
+            uploadKnobAssignments.push_back({ k, ka.section, ka.module, ka.param });
+    }
+    if (!toBank)
+        for (const auto& ca : patch.ctrlAssignments)
+            uploadCtrlAssignments.push_back({ ca.control, ca.section, ca.module, ca.param });
+
     uploadSlot = slot;
+    uploadToBank = toBank;
     uploadPacketIndex = 0;
     ++uploadAckGeneration;
 
-    std::cout << "[UPLOAD] Uploading patch \"" << patch.getName().toStdString()
-              << "\" to slot " << slot << " (" << sections.size() << " sections in "
+    std::cout << "[UPLOAD] Uploading patch \"" << patch.getName().toStdString() << "\" to "
+              << (toBank ? "bank " + std::to_string(bankSection + 1) + " position "
+                               + std::to_string(bankPosition + 1)
+                         : "slot " + std::to_string(slot))
+              << " (" << sections.size() << " sections in "
               << uploadPackets.size() << " packets)" << std::endl;
 
     if (uploadPackets.empty())
@@ -811,6 +1053,11 @@ void ConnectionManager::uploadPatch(int slot, const Patch& patch)
 
     // Send packets one at a time, waiting for ACK between each (like Java protocol)
     waitingForUploadAck = true;
+    if (uploadWaitsForEditAck)
+    {
+        std::cout << "[UPLOAD] Waiting for the ACK of the edit in flight" << std::endl;
+        return;
+    }
     sendNextUploadPacket();
 }
 
@@ -856,8 +1103,9 @@ void ConnectionManager::sendSynthSettings(const SynthSettings& settings)
         std::cout << " " << std::hex << std::setw(2) << std::setfill('0') << (int) b;
     std::cout << std::dec << std::endl;
 
-    juce::Timer::callAfterDelay(250, [this]() {
-        if (isConnected())
+    auto aliveFlag = alive;
+    juce::Timer::callAfterDelay(250, [this, aliveFlag]() {
+        if (*aliveFlag && isConnected())
             requestSynthSettings();
     });
 }
@@ -904,6 +1152,33 @@ void ConnectionManager::sendParameter(int slot, int section, int moduleId, int p
     // Addressed to the owning slot, not necessarily the hardware-focused one
     // (confirmed on real hardware that the G1 applies it regardless).
     protocol.sendMessage(NmCmd::ParameterChange, slot, payload, /*expectsReply=*/false, /*addChecksum=*/true);
+}
+
+void ConnectionManager::sendParameterFromUser(int slot, int section, int moduleId, int parameterId, int value)
+{
+    const bool blocked = !isConnected()
+                      || (waitingForUploadAck && slot == uploadSlot)
+                      || ((waitingForPatchAck || collectingSections) && slot == pendingPatchSlot);
+
+    if (!blocked)
+    {
+        auto& last = focusedParam_[static_cast<size_t>(slot & 0x03)];
+        const int pid = getPatchId(slot);
+        if (last.pid != pid || last.section != section || last.module != moduleId || last.param != parameterId)
+        {
+            ParameterFocusMessage focus;
+            focus.pid = pid;
+            focus.section = section;
+            focus.module = moduleId;
+            focus.parameter = parameterId;
+            // Exactly the original's frame: cc 0x13, no checksum, no reply
+            protocol.sendMessage(NmCmd::ParameterChange, slot, focus.encode(),
+                                 /*expectsReply=*/false, /*addChecksum=*/false);
+            last = { pid, section, moduleId, parameterId };
+        }
+    }
+
+    sendParameter(slot, section, moduleId, parameterId, value);
 }
 
 void ConnectionManager::queueParameter(int slot, int section, int moduleId, int parameterId, int value)
@@ -1060,20 +1335,44 @@ void ConnectionManager::sendControllerSnapshot()
 
 void ConnectionManager::sendRawSysEx(const std::vector<uint8_t>& sysex)
 {
-    if (!isConnected() || !midiDevice)
+    if (!isConnected())
         return;
 
-    midiDevice->sendSysEx(sysex);
+    protocol.sendRawSysEx(sysex);
+}
+
+void ConnectionManager::greetSynth()
+{
+    if (hasOpenPorts())
+        sendHandshake();
+}
+
+void ConnectionManager::sendOsUpdateMessage(const std::vector<uint8_t>& sysex)
+{
+    if (hasOpenPorts())
+        protocol.sendRawSysEx(sysex);
 }
 
 void ConnectionManager::sendNoteOn(int note, int velocity)
 {
-    sendNoteEvent(note, velocity, true);
+    if (!isConnected())
+    {
+        sendNoteEvent(note, velocity, true);  // logs the skip
+        return;
+    }
+    for (const auto& e : editorKey.press(note))
+        sendNoteEvent(e.note, velocity, e.on);
 }
 
 void ConnectionManager::sendNoteOff(int note)
 {
-    sendNoteEvent(note, 0, false);
+    if (!isConnected())
+    {
+        sendNoteEvent(note, 0, false);  // logs the skip
+        return;
+    }
+    for (const auto& e : editorKey.release(note))
+        sendNoteEvent(e.note, 0, e.on);
 }
 
 void ConnectionManager::sendNoteEvent(int note, int velocity, bool on)
@@ -1085,7 +1384,7 @@ void ConnectionManager::sendNoteEvent(int note, int velocity, bool on)
     // (sc=0x41) is incoming-only and rejected with synth error 5.
     juce::ignoreUnused(velocity);
 
-    if (!isConnected() || !midiDevice)
+    if (!isConnected())
     {
         std::cout << "[KEYS] note event skipped: not connected" << std::endl;
         return;
@@ -1097,12 +1396,12 @@ void ConnectionManager::sendNoteEvent(int note, int velocity, bool on)
         static_cast<uint8_t>(on ? 0x00 : 0x01),
         static_cast<uint8_t>(note & 0x7F)
     };
-    midiDevice->sendSysEx(SysEx::encode(0x17, currentSlot, payload, /*addChecksum=*/true));
+    sendRawSysEx(SysEx::encode(0x17, currentSlot, payload, /*addChecksum=*/true));
 }
 
 void ConnectionManager::sendAckedSysEx(const std::vector<uint8_t>& sysex, bool allowNewPatchInSlotReply)
 {
-    if (!isConnected() || !midiDevice)
+    if (!isConnected())
         return;
 
     // Remember which slot the message was built for (header byte 2 carries
@@ -1114,15 +1413,23 @@ void ConnectionManager::sendAckedSysEx(const std::vector<uint8_t>& sysex, bool a
 
 void ConnectionManager::drainAckedQueue()
 {
-    if (ackedQueueWaiting || ackedQueue.empty())
+    if (!isConnected() || ackedQueueWaiting || ackedQueue.empty())
         return;
 
     auto msg = ackedQueue.front();
     ackedQueue.pop_front();
 
+    // A PatchPacket (cc=0x1c-0x1f) spends bit 6 of byte 4 on the command flag,
+    // so its pid is six bits; the cc=0x17 edits get all seven. Overwriting a
+    // pid of 64 or more with a 0x7F mask would set that flag and the synth
+    // would read the packet as a bulk-upload stream.
+    const int msgCc = msg.bytes.size() > 2 ? ((msg.bytes[2] >> 2) & 0x1F) : 0;
+    const bool isPatchPacket = msgCc >= 0x1c;
+
     if (msg.allowNewPatchInSlotReply && msg.bytes.size() > 4)
     {
-        msg.bytes[4] = static_cast<uint8_t>(slotPatchIds[static_cast<size_t>(msg.slot & 0x03)] & 0x7F);
+        const int pidMask = isPatchPacket ? 0x3F : 0x7F;
+        msg.bytes[4] = static_cast<uint8_t>(slotPatchIds[static_cast<size_t>(msg.slot & 0x03)] & pidMask);
 
         if (msg.bytes.size() > 6 && msg.bytes.front() == 0xF0 && msg.bytes.back() == 0xF7)
             msg.bytes[msg.bytes.size() - 2] = SysEx::checksum(msg.bytes.data(), msg.bytes.size() - 2);
@@ -1131,7 +1438,7 @@ void ConnectionManager::drainAckedQueue()
     ackedQueueWaiting = true;
     ackedQueueWaitingAllowsNewPatchInSlot = msg.allowNewPatchInSlotReply;
     int generation = ++ackedQueueGeneration;
-    midiDevice->sendSysEx(msg.bytes);
+    sendRawSysEx(msg.bytes);
 
     std::cout << "[QUEUE] Sent queued message (gen=" << generation
               << ", " << ackedQueue.size() << " remaining), waiting for ACK" << std::endl;
@@ -1139,14 +1446,35 @@ void ConnectionManager::drainAckedQueue()
     // 3-second timeout: if no ACK arrives, unblock the queue.
     // The generation check ensures only the timeout for the *current* message fires.
     auto aliveFlag = alive;
-    juce::Timer::callAfterDelay(ackedTimeoutMs, [this, generation, aliveFlag]() {
+    const int msgSlot = msg.slot;
+    juce::Timer::callAfterDelay(ackedTimeoutMs, [this, generation, aliveFlag,
+                                                 isPatchPacket, msgSlot]() {
         if (!*aliveFlag) return;
         if (ackedQueueWaiting && ackedQueueGeneration == generation)
         {
             std::cout << "[QUEUE] ACK timeout (gen=" << generation << "), unblocking queue ("
                       << ackedQueue.size() << " pending)" << std::endl;
+
+            // A PatchPacket the synth never answered may have left it in
+            // bulk-receive state, where it goes deaf to all MIDI until it sees
+            // a packet flagged `last` (issue #40). One empty terminating packet
+            // gets it back without a power cycle.
+            if (isPatchPacket)
+            {
+                std::cout << "[QUEUE] Unanswered patch packet: closing the transfer "
+                             "so the synth leaves bulk-receive state" << std::endl;
+                sendRawSysEx(UploadPacketizer::closeTransferFrame(msgSlot));
+            }
+
             ackedQueueWaiting = false;
             ackedQueueWaitingAllowsNewPatchInSlot = false;
+            if (uploadWaitsForEditAck)
+            {
+                uploadWaitsForEditAck = false;
+                if (waitingForUploadAck)
+                    sendNextUploadPacket();
+                return;
+            }
             drainAckedQueue();
         }
     });
@@ -1177,13 +1505,59 @@ void ConnectionManager::onAckReceived(const AckMessage& msg)
         }
     }
 
+    if (takeFlashDumpEmpty(msg))
+        return;
+
+    if (uploadWaitsForEditAck)
+    {
+        // The ACK of the edit that was in flight when the upload began: not the
+        // upload's. Its pid is the synth's patch now, which the upload goes on from.
+        uploadWaitsForEditAck = false;
+        ackedQueueWaiting = false;
+        ackedQueueWaitingAllowsNewPatchInSlot = false;
+        if (msg.type == 0x7f && msg.pid1 != currentPatchId)
+        {
+            currentPatchId = msg.pid1;
+            slotPatchIds[static_cast<size_t>(currentSlot & 0x03)] = msg.pid1;
+        }
+        std::cout << "[UPLOAD] Edit in flight ACKed, starting the upload" << std::endl;
+        if (waitingForUploadAck)
+            sendNextUploadPacket();
+        return;
+    }
+
+    // A write to a bank ends with an answer of type 0x18 once the flash is
+    // written (~440 ms on G1-Emu): 00 when it is stored, then the position and
+    // name. Anything else is the synth refusing it (Clavia's editor knows
+    // "Memory protect on" and "Memory full"), and the transfer stops there.
+    if (waitingForUploadAck && uploadToBank && msg.type == 0x18 && msg.pid2 != 0)
+    {
+        std::cout << "[UPLOAD] The synth did not store the patch (code " << msg.pid2
+                  << ")" << std::endl;
+        ++uploadAckGeneration;  // the timeout for this packet has nothing left to do
+        waitingForUploadAck = false;
+        closeUploadTransfer("bank write refused");
+        uploadPackets.clear();
+        uploadPacketIndex = 0;
+        const juce::String reason = "The synth did not store the patch (code "
+                                  + juce::String(msg.pid2) + ")";
+        setStatus(State::Connected, reason);
+        notifyUploadFailed(reason);
+        if (bankUploadResultCallback)
+            notifyBankUploadResult(false);
+        return;
+    }
+
     if (waitingForUploadAck)
     {
         // Upload ACKs belong to uploadSlot, which may differ from the focused
         // slot. Classify them before generic focused-slot PID resynchronization.
-        slotPatchIds[static_cast<size_t>(uploadSlot & 0x03)] = msg.pid1;
-        if (uploadSlot == currentSlot)
-            currentPatchId = msg.pid1;
+        if (!uploadToBank)
+        {
+            slotPatchIds[static_cast<size_t>(uploadSlot & 0x03)] = msg.pid1;
+            if (uploadSlot == currentSlot)
+                currentPatchId = msg.pid1;
+        }
         ++uploadAckGeneration;  // invalidate timeout for the packet just ACKed
         uploadPacketIndex++;
         std::cout << "[UPLOAD] ACK for packet " << (uploadPacketIndex - 1)
@@ -1197,7 +1571,18 @@ void ConnectionManager::onAckReceived(const AckMessage& msg)
         return;
     }
 
-    if (waitingForPatchAck)
+    // Only the RequestPatch answer (type 0x36) starts the section fetch. A bare
+    // ACK arriving now answers something sent before - typically a GetPatch of
+    // the fetch this request superseded - and its pid is not this fetch's.
+    if (waitingForPatchAck && msg.type == 0x36 && fetchSuperseded)
+    {
+        std::cout << "[PATCH] Slot " << static_cast<char>('A' + (pendingPatchSlot & 0x03))
+                  << " got a newer pid while its request was pending - asking again" << std::endl;
+        sendPatchRequest(pendingPatchSlot);
+        return;
+    }
+
+    if (waitingForPatchAck && msg.type == 0x36)
     {
         waitingForPatchAck = false;
         collectingSections = true;
@@ -1425,7 +1810,22 @@ void ConnectionManager::onPatchListReceived(const AckMessage& msg)
     static const bool verboseLog = (std::getenv("NME_MIDI_LOG") != nullptr);
 
     if (!fetchingPatchList)
+    {
+        // Not a list fetch: the synth's answer to a Store, if one is waiting
+        if (pendingStoreSection >= 0)
+        {
+            auto reply = PatchListResponseMessage::decode(
+                msg.payload.data(), msg.payload.size(), 0, 0);
+            for (const auto& entry : reply.entries)
+                if (entry.section == pendingStoreSection && entry.position == pendingStorePosition
+                    && !entry.name.empty())
+                {
+                    finishStoreConfirmation(true);
+                    break;
+                }
+        }
         return;
+    }
 
     if (verboseLog)
     {
@@ -1515,8 +1915,11 @@ void ConnectionManager::sendGetPatchMessages(int patchId, int slot)
         // come as PatchPacket (cc=0x1c-0x1f). Java GetPatchMessage sets
         // expectsreply=true: each section request must wait for its reply,
         // otherwise the burst overruns the synth and sections are dropped.
+        const bool skippable = m.section == GetPatchMessage::CommonParameter
+                            || m.section == GetPatchMessage::CommonNameDump;
         protocol.sendMessage(NmCmd::PatchHandling, slot, payload,
-                             /*expectsReply=*/true, /*addChecksum=*/true);
+                             /*expectsReply=*/true, /*addChecksum=*/true,
+                             skippable ? getPatchCommonTag : getPatchTag);
     }
 }
 
@@ -1575,6 +1978,18 @@ void ConnectionManager::retryMissingSections()
         return;
     }
 
+    // The synth has moved the slot on to another pid since the burst went out:
+    // asking again for the same sections would get the same bare ACKs.
+    const int slotPid = slotPatchIds[static_cast<size_t>(pendingPatchSlot & 0x03)];
+    if (slotPid >= 0 && slotPid != fetchPatchId && patchRequestAttemptsLeft > 0)
+    {
+        std::cout << "[PATCH] Fetch stalled with pid " << fetchPatchId << " but slot "
+                  << static_cast<char>('A' + (pendingPatchSlot & 0x03)) << " is now pid "
+                  << slotPid << " - requesting the patch again" << std::endl;
+        sendPatchRequest(pendingPatchSlot);
+        return;
+    }
+
     --sectionRetriesLeft;
     patchTimeoutGeneration++;  // invalidate the timers of the stalled attempt
 
@@ -1589,7 +2004,7 @@ void ConnectionManager::retryMissingSections()
         m.pid = fetchPatchId;
         m.section = static_cast<GetPatchMessage::Section>(s);
         protocol.sendMessage(NmCmd::PatchHandling, pendingPatchSlot, m.encode(),
-                             /*expectsReply=*/true, /*addChecksum=*/true);
+                             /*expectsReply=*/true, /*addChecksum=*/true, getPatchTag);
     }
 
     startPatchTimeout();
@@ -1624,14 +2039,7 @@ void ConnectionManager::finalizePatch()
     // must not hijack where parameter edits are sent. Focus only moves via
     // selectSlot() and the synth's SlotActivated notification.
 
-    if (bankFetchCallback)
-    {
-        // Bank transfer: sections go to disk, the editor model is untouched.
-        auto cb = std::move(bankFetchCallback);
-        bankFetchCallback = nullptr;
-        cb(patchSections, completedSlot);
-    }
-    else if (patchDataCallback)
+    if (patchDataCallback)
     {
         patchDataCallback(patchSections, completedSlot);
 
@@ -1834,6 +2242,24 @@ void ConnectionManager::onNMInfoReceived(const NMInfoMessage& msg)
         {
             std::cout << "[UPLOAD] Ignoring NewPatchInSlot during upload" << std::endl;
         }
+        else if (isConnected() && msg.newPatchSlot == pendingPatchSlot && waitingForPatchAck)
+        {
+            // Front-panel loads announce two pids back to back. The request
+            // already sent may be answered with the first; ask again then.
+            fetchSuperseded = true;
+        }
+        else if (isConnected() && msg.newPatchSlot == pendingPatchSlot && collectingSections
+                 && msg.newPatchPid != fetchPatchId)
+        {
+            // The sections being fetched belong to a pid the slot no longer
+            // has: the synth answers each with a bare ACK and no data, and the
+            // fetch ended as an "Incomplete Patch Load" of 0 sections. Start
+            // over on the new pid instead of waiting that out.
+            std::cout << "[PATCH] Slot " << static_cast<char>('A' + msg.newPatchSlot)
+                      << " moved to pid " << msg.newPatchPid << " mid-fetch (was "
+                      << fetchPatchId << ") - restarting the fetch" << std::endl;
+            requestPatch(msg.newPatchSlot);
+        }
         else if (isConnected() && msg.newPatchSlot >= 0)
         {
             // The wire was busy with another fetch. Dropping the notification
@@ -1869,17 +2295,19 @@ void ConnectionManager::onNMInfoReceived(const NMInfoMessage& msg)
             closeUploadTransfer("rejected by synth");
             uploadPackets.clear();
             uploadPacketIndex = 0;
-            setStatus(State::Connected,
-                      "Upload rejected by synth (code " + juce::String(errorCode)
-                          + ": " + juce::String(synthErrorName(errorCode)) + ")");
+            const juce::String reason = "Upload rejected by synth (code " + juce::String(errorCode)
+                                        + ": " + juce::String(synthErrorName(errorCode)) + ")";
+            setStatus(State::Connected, reason);
+            notifyUploadFailed(reason);
         }
 
         if (synthErrorCallback)
         {
-            // Capture callback by value so it's safe even if ConnectionManager
-            // is destroyed before the async fires.
             auto cb = synthErrorCallback;
-            juce::MessageManager::callAsync([cb, errorCode]() { cb(errorCode); });
+            auto aliveFlag = alive;
+            juce::MessageManager::callAsync([cb, errorCode, aliveFlag]() {
+                if (*aliveFlag) cb(errorCode);
+            });
         }
     }
 
@@ -1968,6 +2396,9 @@ void ConnectionManager::onNMInfoReceived(const NMInfoMessage& msg)
 
 void ConnectionManager::onPatchPacketReceived(const PatchPacketMessage& msg)
 {
+    if (takeFlashDumpPacket(msg))
+        return;
+
     // In Java protocol, PatchMessage.isreply = true — patch packets unblock the send queue.
     // The synth may respond to some edit commands (NewModule) with a patch confirmation packet.
     if (ackedQueueWaiting)
@@ -2024,7 +2455,10 @@ void ConnectionManager::onPatchPacketReceived(const PatchPacketMessage& msg)
             if (synthSettingsCallback)
             {
                 auto cb = synthSettingsCallback;
-                juce::MessageManager::callAsync([cb, settings]() { cb(settings); });
+                auto aliveFlag = alive;
+                juce::MessageManager::callAsync([cb, settings, aliveFlag]() {
+                    if (*aliveFlag) cb(settings);
+                });
             }
             return;
         }
@@ -2063,11 +2497,16 @@ void ConnectionManager::onPatchPacketReceived(const PatchPacketMessage& msg)
             }
             sectionSeen[static_cast<size_t>(sectionKind)] = true;
         }
+        const bool emptyCommonArea = sectionKind == GetPatchMessage::CommonModule
+                                  && moduleDumpCount(sectionAccumulator) == 0;
 
         // Store completed section separately (each has independent 7-bit encoding)
         patchSections.push_back(std::move(sectionAccumulator));
         sectionAccumulator.clear();
         sectionsReceived++;
+
+        if (emptyCommonArea)
+            skipEmptyCommonSections();
 
         if (patchLoadProgressCallback)
             patchLoadProgressCallback(sectionsReceived, totalSections);
@@ -2086,6 +2525,69 @@ void ConnectionManager::onPatchPacketReceived(const PatchPacketMessage& msg)
             startSectionStaleTimeout();
         }
     }
+}
+
+void ConnectionManager::requestFlashDump(int section, int position, FlashDumpCallback cb)
+{
+    flashDumpAccumulator.clear();
+    flashDumpCallback = nullptr;
+    if (!isConnected())
+        return;
+
+    flashDumpSection = juce::jlimit(0, 8, section);
+    flashDumpPosition = juce::jlimit(0, 98, position);
+    flashDumpCallback = std::move(cb);
+
+    FlashDumpRequestMessage msg { flashDumpSection, flashDumpPosition };
+    protocol.sendMessage(NmCmd::PatchHandling, 0, msg.encode(), /*expectsReply=*/true,
+                         /*addChecksum=*/true);
+}
+
+// The answer to requestFlashDump() for an occupied position: a PatchPacket whose
+// stream opens with the 0x18 section naming that position. Taken before any
+// other use of patch packets, which would read it as settings or stray data.
+bool ConnectionManager::takeFlashDumpPacket(const PatchPacketMessage& msg)
+{
+    if (!flashDumpCallback)
+        return false;
+
+    if (flashDumpAccumulator.empty())
+    {
+        FlashDumpReply reply;
+        if (!FlashDumpReply::peek(msg.patchData, reply)
+            || reply.section != flashDumpSection || reply.position != flashDumpPosition)
+            return false;
+    }
+
+    flashDumpAccumulator.insert(flashDumpAccumulator.end(),
+                                msg.patchData.begin(), msg.patchData.end());
+    if (msg.isLast)
+    {
+        auto data = std::move(flashDumpAccumulator);
+        flashDumpAccumulator.clear();
+        deliverFlashDump(std::move(data));
+    }
+    return true;
+}
+
+// The answer for an empty position: ACK type 0x18, pid2 04, then bank and position.
+bool ConnectionManager::takeFlashDumpEmpty(const AckMessage& msg)
+{
+    if (!flashDumpCallback || msg.type != 0x18 || msg.pid2 != 0x04 || msg.payload.size() < 2)
+        return false;
+    if ((msg.payload[0] & 0x7F) != flashDumpSection || (msg.payload[1] & 0x7F) != flashDumpPosition)
+        return false;
+
+    deliverFlashDump({});
+    return true;
+}
+
+void ConnectionManager::deliverFlashDump(std::vector<uint8_t> patchData)
+{
+    auto cb = std::move(flashDumpCallback);
+    flashDumpCallback = nullptr;
+    if (cb)
+        cb(flashDumpSection, flashDumpPosition, patchData);
 }
 
 void ConnectionManager::onError(const ErrorMessage& msg)
@@ -2113,17 +2615,27 @@ void ConnectionManager::setStatus(State state, const juce::String& message)
 
 void ConnectionManager::startHandshakeTimeout()
 {
-    // Use a Timer via callAfterDelay for the 3-second handshake timeout
+    // A G1-Emu on its direct link gets longer, with the greeting said again every 3 s: several
+    // emulators in one DAW share the CPU, and one that has just been added can take longer than a
+    // G1 to answer. Giving up on it after 3 s left it connected but counted as gone.
+    const bool link = isDirectLink();
+    const int attempts = link ? 5 : 1;
     auto aliveFlag = alive;
-    juce::Timer::callAfterDelay(NmProtocol::timeoutMs, [this, aliveFlag]()
+    for (int i = 1; i <= attempts; ++i)
     {
-        if (!*aliveFlag) return;
-        if (status.state == State::Connecting)
+        juce::Timer::callAfterDelay(NmProtocol::timeoutMs * i, [this, aliveFlag, i, attempts]()
         {
+            if (!*aliveFlag || status.state != State::Connecting)
+                return;
+            if (i < attempts)
+            {
+                sendHandshake();   // still waiting: say hello again
+                return;
+            }
             DBG("ConnectionManager: handshake timeout");
             setStatus(State::Disconnected, "No response from synth (timeout)");
-        }
-    });
+        });
+    }
 }
 
 void ConnectionManager::cancelHandshakeTimeout()
@@ -2237,6 +2749,36 @@ void ConnectionManager::deletePatchInBank(int section, int position)
     });
 }
 
+void ConnectionManager::expectStoreConfirmation(int section, int position,
+                                                StoreConfirmCallback cb, int timeoutMs)
+{
+    // A store still waiting is given up on: its answer would be taken for this one's
+    if (pendingStoreSection >= 0)
+        finishStoreConfirmation(false);
+
+    pendingStoreSection = section;
+    pendingStorePosition = position;
+    storeConfirmCallback = std::move(cb);
+
+    const int generation = ++storeGeneration;
+    auto aliveFlag = alive;
+    juce::Timer::callAfterDelay(timeoutMs, [this, aliveFlag, generation]() {
+        if (*aliveFlag && generation == storeGeneration && pendingStoreSection >= 0)
+            finishStoreConfirmation(false);
+    });
+}
+
+void ConnectionManager::finishStoreConfirmation(bool confirmed)
+{
+    auto cb = std::move(storeConfirmCallback);
+    storeConfirmCallback = nullptr;
+    pendingStoreSection = -1;
+    pendingStorePosition = -1;
+    ++storeGeneration;
+    if (cb)
+        cb(confirmed);
+}
+
 void ConnectionManager::storeLoadedSlotToBank(int slot, int section, int position, std::function<void()> afterStoreQueued)
 {
     std::cout << "[BANK] Storing from slot " << slot << " to bank ("
@@ -2247,4 +2789,49 @@ void ConnectionManager::storeLoadedSlotToBank(int slot, int section, int positio
 
     if (afterStoreQueued)
         afterStoreQueued();
+}
+
+// Texts of the error codes the synth returns in sc 0x7e, as the original
+// editor words them (NME303.exe, FUN_004e4480; G1originaleditor/notes/11).
+// The numbering is confirmed on G1-Emu: a bad checksum comes back as 4.
+// 5 is the one that matters: the original tells the user to power-cycle.
+const char* synthErrorName(int code)
+{
+    switch (code)
+    {
+        case 3:  return "Error in synth";
+        case 4:  return "Down link checksum error";
+        case 5:  return "Stream execute error. Synth may be corrupted, turn it off and on";
+        case 6:  return "Unfinished bubble error";
+        default: return "unknown";
+    }
+}
+
+int moduleDumpCount(const std::vector<uint8_t>& entry)
+{
+    Midi7BitReader reader(entry);
+    int type = -1, area = 0, count = 0;
+    if (!reader.readBits(8, type) || type != 74
+        || !reader.readBits(1, area) || !reader.readBits(7, count))
+        return -1;
+    return count;
+}
+
+// The common area had no modules, so asking the synth for its parameters and
+// names would only fetch two empty sections, a round trip each. Drop those
+// requests and count the sections as received, the way the original editor
+// skips them (G1originaleditor/notes/12).
+void ConnectionManager::skipEmptyCommonSections()
+{
+    protocol.discardQueued(getPatchCommonTag);
+
+    for (auto section : { GetPatchMessage::CommonParameter, GetPatchMessage::CommonNameDump })
+    {
+        if (sectionSeen[static_cast<size_t>(section)])
+            continue;
+        sectionSeen[static_cast<size_t>(section)] = true;
+        ++sectionsReceived;
+    }
+
+    std::cout << "[PATCH] Common area has no modules - skipped its parameter and name requests" << std::endl;
 }

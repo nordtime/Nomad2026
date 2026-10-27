@@ -13,8 +13,8 @@
 #define kBtnOn  (AppTheme::palette().buttonActive)
 static void styleLabel(juce::Label& l)
 {
-    l.setFont(juce::Font(AppTheme::uiFont(10.0f).withStyle("Bold")));
-    l.setColour(juce::Label::textColourId,       kGold);
+    l.setFont(juce::Font(AppTheme::uiFont(12.5f).withStyle("Bold")));
+    l.setColour(juce::Label::textColourId,       AppTheme::palette().textMuted);
     l.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
 }
 
@@ -61,21 +61,11 @@ BankTransferDialog::BankTransferDialog(Mode mode, BankTransferManager& mgr,
     addAndMakeVisible(bankLabel);
     addAndMakeVisible(bankCombo);
 
-    styleLabel(slotLabel);
-    slotCombo.addItem("A  (Slot 1)", 1);
-    slotCombo.addItem("B  (Slot 2)", 2);
-    slotCombo.addItem("C  (Slot 3)", 3);
-    slotCombo.addItem("D  (Slot 4)", 4);
-    slotCombo.setSelectedItemIndex(juce::jlimit(0, 3, connection.getCurrentSlot()),
-                                   juce::dontSendNotification);
-    styleCombo(slotCombo);
-    addAndMakeVisible(slotLabel);
-    addAndMakeVisible(slotCombo);
-
     styleLabel(folderLabel);
-    folderLabel.setText(mode_ == Mode::SendToSynth ? "SOURCE FOLDER" : "DESTINATION FOLDER",
+    folderLabel.setText(mode_ == Mode::SendToSynth ? "SOURCE (.PCHLIST OR FOLDER)" : "DESTINATION FOLDER",
                         juce::dontSendNotification);
-    folderField.setFont(juce::Font(AppTheme::uiFont(12.0f)));
+    folderField.setFont(juce::Font(AppTheme::uiFont(14.0f)));
+    folderField.setBorderSize(juce::BorderSize<int>(0, 10, 0, 10));
     folderField.setColour(juce::Label::textColourId, kText);
     folderField.setColour(juce::Label::backgroundColourId, kCtrlBg);
     folderField.setColour(juce::Label::outlineColourId, kCtrlBd);
@@ -93,13 +83,13 @@ BankTransferDialog::BankTransferDialog(Mode mode, BankTransferManager& mgr,
     addAndMakeVisible(folderField);
     addAndMakeVisible(browseButton);
 
-    infoLabel.setFont(juce::Font(AppTheme::uiFont(12.0f)));
+    infoLabel.setFont(juce::Font(AppTheme::uiFont(13.0f)));
     infoLabel.setColour(juce::Label::textColourId,
                         mode_ == Mode::SaveToDisk ? kText : kAmber);
     infoLabel.setJustificationType(juce::Justification::topLeft);
     addAndMakeVisible(infoLabel);
 
-    statusLabel.setFont(juce::Font(AppTheme::uiFont(12.0f)));
+    statusLabel.setFont(juce::Font(AppTheme::uiFont(13.0f)));
     statusLabel.setColour(juce::Label::textColourId, kText);
     addAndMakeVisible(statusLabel);
 
@@ -109,6 +99,8 @@ BankTransferDialog::BankTransferDialog(Mode mode, BankTransferManager& mgr,
 
     styleBtn(startButton);
     styleBtn(cancelButton);
+    startButton.setColour(juce::TextButton::buttonColourId,  kGold);   // Start does the thing
+    startButton.setColour(juce::TextButton::textColourOffId, AppTheme::palette().backgroundMain);
     startButton.onClick  = [this]() { startTransfer(); };
     cancelButton.onClick = [this]()
     {
@@ -124,7 +116,7 @@ BankTransferDialog::BankTransferDialog(Mode mode, BankTransferManager& mgr,
     addAndMakeVisible(cancelButton);
 
     updateInfo();
-    setSize(440, 332);
+    setSize(520, 440);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -132,14 +124,19 @@ void BankTransferDialog::browseForFolder()
 {
     const auto title = mode_ == Mode::SaveToDisk
         ? "Choose a folder to save the bank into"
-        : "Choose a folder with .pch files to send";
+        : "Choose a .pchList, or a folder with .pch files, to send";
 
     chooser = std::make_unique<juce::FileChooser>(
-        title, juce::File::getSpecialLocation(juce::File::userDocumentsDirectory));
+        title, juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+        mode_ == Mode::SendToSynth ? "*.pchList;*.pchlist" : juce::String());
+
+    auto chooserFlags = juce::FileBrowserComponent::openMode
+               | juce::FileBrowserComponent::canSelectDirectories;
+    if (mode_ == Mode::SendToSynth)
+        chooserFlags |= juce::FileBrowserComponent::canSelectFiles;
 
     juce::Component::SafePointer<BankTransferDialog> safeThis(this);
-    chooser->launchAsync(juce::FileBrowserComponent::openMode
-                             | juce::FileBrowserComponent::canSelectDirectories,
+    chooser->launchAsync(chooserFlags,
         [safeThis](const juce::FileChooser& fc) {
             if (safeThis == nullptr || fc.getResult() == juce::File())
                 return;
@@ -150,9 +147,9 @@ void BankTransferDialog::browseForFolder()
 
             if (safeThis->mode_ == Mode::SendToSynth)
             {
-                safeThis->scannedFiles = safeThis->chosenFolder.findChildFiles(
-                    juce::File::findFiles, /*recursive=*/false, "*.pch");
-                safeThis->scannedFiles.sort();
+                safeThis->sendProblems.clear();
+                safeThis->sendItems = BankTransferManager::itemsFrom(
+                    safeThis->chosenFolder, safeThis->sendProblems, safeThis->sendList);
             }
 
             safeThis->updateInfo();
@@ -175,8 +172,9 @@ void BankTransferDialog::updateInfo()
             info = "Patch list not loaded yet - connect and let the Synth browser load it first.";
         else
             info = juce::String(count) + " patches across all 9 banks will be saved into "
-                 + "Bank1-Bank9 folders.\nWARNING: existing .pch files inside those folders"
-                 + " are deleted first (mirror backup).";
+                 + "Bank1-Bank9 folders.\nThe folders are replaced only once the whole "
+                 + "backup has been fetched, so a backup that fails or is cancelled "
+                 + "leaves the previous one intact.";
         infoLabel.setText(info, juce::dontSendNotification);
     }
     else if (mode_ == Mode::SaveToDisk)
@@ -192,22 +190,34 @@ void BankTransferDialog::updateInfo()
 
         juce::String info;
         if (!connection.isPatchListLoaded())
-            info = "Patch list not loaded yet - connect and let the Synth browser load it first.";
+            info = "All 99 positions of bank " + juce::String(bank)
+                 + " will be read, and the patches saved as .pch files with a Bank"
+                 + juce::String(bank) + ".pchList.";
         else
             info = juce::String(count) + " patches in bank " + juce::String(bank)
-                 + " will be saved as .pch files.\nThe temp slot's content on the synth"
-                 + " will be replaced during the transfer.";
+                 + " will be saved as .pch files, with a Bank" + juce::String(bank)
+                 + ".pchList that keeps their positions.\nNo slot on the synth changes.";
         infoLabel.setText(info, juce::dontSendNotification);
     }
     else
     {
         juce::String info;
-        if (scannedFiles.isEmpty())
-            info = "Select a folder containing .pch files.";
+        const int n = static_cast<int>(sendItems.size());
+        if (chosenFolder == juce::File())
+            info = "Select a .pchList, or a folder with .pch files.";
+        else if (n == 0)
+            info = sendProblems.isEmpty() ? "No .pch files in this folder."
+                                          : sendProblems.joinIntoString(", ").substring(0, 160);
+        else if (sendList != juce::File())
+            info = juce::String(n) + " patches from " + sendList.getFileName()
+                 + ", each to its own position.\n"
+                 + "WARNING: they will OVERWRITE those positions of bank " + juce::String(bank) + ".";
         else
-            info = juce::String(scannedFiles.size()) + " .pch files found (sorted by name).\n"
+            info = juce::String(n) + " .pch files, sorted by name.\n"
                  + "WARNING: they will OVERWRITE bank " + juce::String(bank)
-                 + " positions 1-" + juce::String(juce::jmin(scannedFiles.size(), 99)) + ".";
+                 + " positions 1-" + juce::String(n) + ".";
+        if (n > 0 && !sendProblems.isEmpty())
+            info << " " << sendProblems.size() << " left out.";
         infoLabel.setText(info, juce::dontSendNotification);
     }
 }
@@ -230,9 +240,8 @@ void BankTransferDialog::startTransfer()
     }
 
     const int section = bankCombo.getSelectedItemIndex();
-    const int slot    = slotCombo.getSelectedItemIndex();
 
-    if (mode_ != Mode::SendToSynth && !connection.isPatchListLoaded())
+    if (mode_ == Mode::BackupAllBanks && !connection.isPatchListLoaded())
     {
         statusLabel.setText("Patch list not loaded yet - try again shortly.",
                             juce::dontSendNotification);
@@ -240,7 +249,7 @@ void BankTransferDialog::startTransfer()
         return;
     }
 
-    if (mode_ == Mode::SendToSynth && scannedFiles.isEmpty())
+    if (mode_ == Mode::SendToSynth && sendItems.empty())
     {
         statusLabel.setText("No .pch files in the selected folder.", juce::dontSendNotification);
         return;
@@ -250,7 +259,6 @@ void BankTransferDialog::startTransfer()
     progressValue = 0.0;
     startButton.setEnabled(false);
     bankCombo.setEnabled(false);
-    slotCombo.setEnabled(false);
     browseButton.setEnabled(false);
     cancelButton.setButtonText("Cancel");
 
@@ -261,11 +269,11 @@ void BankTransferDialog::startTransfer()
     };
 
     if (mode_ == Mode::SaveToDisk)
-        manager.saveBankToDisk(section, chosenFolder, slot, progressCb);
+        manager.saveBankToDisk(section, chosenFolder, progressCb);
     else if (mode_ == Mode::BackupAllBanks)
-        manager.saveAllBanksToDisk(chosenFolder, slot, progressCb);
+        manager.saveAllBanksToDisk(chosenFolder, progressCb);
     else
-        manager.sendBankToSynth(scannedFiles, section, slot, progressCb);
+        manager.sendBankToSynth(sendItems, section, progressCb);
 }
 
 void BankTransferDialog::onProgress(const BankTransferManager::Progress& p)
@@ -282,8 +290,7 @@ void BankTransferDialog::onProgress(const BankTransferManager::Progress& p)
 
     running = false;
     startButton.setEnabled(true);
-    bankCombo.setEnabled(true);
-    slotCombo.setEnabled(true);
+    bankCombo.setEnabled(mode_ != Mode::BackupAllBanks);
     browseButton.setEnabled(true);
     cancelButton.setButtonText("Close");
 
@@ -311,62 +318,50 @@ bool BankTransferDialog::keyPressed(const juce::KeyPress& key)
 }
 
 void BankTransferDialog::mouseDown(const juce::MouseEvent& e)
-    { if (e.getPosition().getY() < 32) dragger.startDraggingComponent(this, e); }
+    { if (e.getPosition().getY() < 40) dragger.startDraggingComponent(this, e); }
 void BankTransferDialog::mouseDrag(const juce::MouseEvent& e)
-    { dragger.dragComponent(this, e, nullptr); }
+    { if (e.getMouseDownPosition().getY() < 40) dragger.dragComponent(this, e, nullptr); }  // only a drag that began on the title bar moves the window (the press position says where it began)
 
 void BankTransferDialog::paint(juce::Graphics& g)
 {
-    g.fillAll(kBg);
-
-    g.setColour(kGold);
-    g.setFont(juce::Font(AppTheme::uiFont(14.0f)).boldened());
     const auto title = mode_ == Mode::SaveToDisk    ? "Save Bank to Disk"
                      : mode_ == Mode::BackupAllBanks ? "Backup All Banks"
                                                      : "Send Bank to Synth";
-    g.drawText(title, 10, 0, getWidth() - 44, 32, juce::Justification::centredLeft);
-
-    g.setColour(kSep);
-    g.fillRect(0, 31, getWidth(), 1);
-
-    const int sepY = getHeight() - 50;
-    g.drawHorizontalLine(sepY, 14.0f, static_cast<float>(getWidth() - 14));
+    AppTheme::drawDialogChrome(g, getLocalBounds(), title, 40, 68);
 }
 
 void BankTransferDialog::resized()
 {
-    constexpr int titleH = 32, pad = 14, secH = 14, rowH = 28, gap = 6;
+    constexpr int titleH = 40, footerH = 68, pad = 24, secH = 18, rowH = 36, gap = 10;
 
-    closeButton.setBounds(getWidth() - 32, 2, 28, 28);
+    closeButton.setBounds(getWidth() - 36, 6, 28, 28);
 
-    int y = titleH + gap;
+    int y = titleH + 16;
     const int w = getWidth() - pad * 2;
 
-    bankLabel.setBounds(pad, y, w / 2 - 4, secH);
-    slotLabel.setBounds(pad + w / 2 + 4, y, w / 2 - 4, secH);
-    y += secH + 2;
-    bankCombo.setBounds(pad, y, w / 2 - 4, rowH);
-    slotCombo.setBounds(pad + w / 2 + 4, y, w / 2 - 4, rowH);
-    y += rowH + gap + 4;
+    bankLabel.setBounds(pad, y, w / 2 - 6, secH);
+    y += secH + 4;
+    bankCombo.setBounds(pad, y, w / 2 - 6, rowH);
+    y += rowH + 18;
 
     folderLabel.setBounds(pad, y, w, secH);
-    y += secH + 2;
-    folderField.setBounds(pad, y, w - 90, rowH);
-    browseButton.setBounds(pad + w - 84, y, 84, rowH);
-    y += rowH + gap + 4;
+    y += secH + 4;
+    folderField.setBounds(pad, y, w - 104, rowH);
+    browseButton.setBounds(pad + w - 96, y, 96, rowH);
+    y += rowH + 18;
 
-    infoLabel.setBounds(pad, y, w, 44);
-    y += 44 + gap;
+    infoLabel.setBounds(pad, y, w, 48);
+    y += 48 + gap;
 
-    progressBar.setBounds(pad, y, w, 18);
-    y += 18 + gap;
+    progressBar.setBounds(pad, y, w, 26);
+    y += 26 + gap;
 
     statusLabel.setBounds(pad, y, w, 40);
 
-    const int btnW = 80, btnH = 26;
-    const int btnY = getHeight() - pad - btnH;
-    cancelButton.setBounds(getWidth() - pad - btnW,         btnY, btnW, btnH);
-    startButton .setBounds(getWidth() - pad - btnW * 2 - 8, btnY, btnW, btnH);
+    const int btnW = 100, btnH = 36;
+    const int btnY = getHeight() - footerH + (footerH - btnH) / 2;
+    cancelButton.setBounds(getWidth() - pad - btnW,          btnY, btnW, btnH);
+    startButton .setBounds(getWidth() - pad - btnW * 2 - 12, btnY, btnW, btnH);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

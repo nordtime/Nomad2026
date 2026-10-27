@@ -3,6 +3,7 @@
 #include "NmProtocol.h"
 #include "MidiDeviceManager.h"
 #include "UploadPacketizer.h"
+#include "EditorKey.h"
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -12,6 +13,13 @@
 #include <vector>
 
 class Patch;
+
+// Text for an error code the synth returns (sc 0x7e); see ConnectionManager.cpp
+const char* synthErrorName(int code);
+
+// How many modules a ModuleDump entry of a patch fetch lists (type 74: the type,
+// then 1 bit of area and 7 of count), or -1 if the entry is not one.
+int moduleDumpCount(const std::vector<uint8_t>& entry);
 
 class ConnectionManager : public NmProtocol::Listener
 {
@@ -32,19 +40,34 @@ public:
         juce::String message = "Disconnected";
         int synthVersionHigh = 0;
         int synthVersionLow = 0;
+        SynthModel synthModel = SynthModel::Unknown;   // from the device byte of the synth's IAm
     };
 
     // Connection management
     bool connect(const juce::String& inputId, const juce::String& outputId);
-    void disconnect();
+    void disconnect(const juce::String& reason = "Disconnected");
 
     bool isConnected() const { return status.state == State::Connected; }
+    // A Micro Modular answered: one slot, one DSP, and its own panel (Nord Micro Modular).
+    // How many slots the synth on this connection has: the Micro's one, or the rack's four.
+    int slotCount() const { return status.synthModel == SynthModel::Micro ? 1 : 4; }
+    bool isMicroModular() const { return status.state == State::Connected && status.synthModel == SynthModel::Micro; }
+    // Ports (or a direct link) still open, whatever the state says: a synth that did not answer in
+    // time is "Disconnected" but still listened to, and comes back by itself when it speaks.
+    bool hasOpenPorts() const { return midiDevice != nullptr && midiDevice->isConnected(); }
+    bool isDirectLink() const { return midiDevice != nullptr && midiDevice->isDirectLink(); }
     const Status& getStatus() const { return status; }
+    // The MIDI input port the editor is on, empty when not connected.
+    juce::String getConnectedPortName() const { return midiDevice ? midiDevice->getInputDeviceName() : juce::String(); }
 
     // Synth commands
     void requestPatch(int slot = 0);
     void loadPatchFromBank(int section, int position, int targetSlot = -1);  // -1 = use current slot
     void uploadPatch(int slot, const Patch& patch);  // Upload full patch to synth working slot
+    // Write a patch straight to a bank position, as Clavia's editor sends a bank:
+    // no slot is focused, loaded or stored from. The result goes to the bank
+    // upload callback.
+    void uploadPatchToBank(int section, int position, const Patch& patch);
     void requestSynthSettings();
     void sendSynthSettings(const SynthSettings& settings);
     // slot is explicit (not the hardware-focused slot) — confirmed on real
@@ -52,6 +75,14 @@ public:
     // a slot other than the one with front-panel focus, which is what makes
     // simultaneous multi-window editing viable (see the multi-window plan).
     void sendParameter(int slot, int section, int moduleId, int parameterId, int value);
+
+    // A value the user is setting by hand (knob, slider, inspector, floater).
+    // Sends a ParamFocus first when this is a different parameter from the last
+    // one touched in that slot, so the synth's display follows the editor the
+    // way it does with the original editor, then the value itself. Bulk and
+    // programmatic changes (undo, morph sweeps, randomize) keep using
+    // sendParameter/queueParameter and never move the synth's focus.
+    void sendParameterFromUser(int slot, int section, int moduleId, int parameterId, int value);
 
     // Throttled + coalesced parameter delivery. Use this for bulk changes
     // (Mutator/Randomize snapshots) so a large patch does not flood the synth
@@ -64,9 +95,20 @@ public:
     void sendControllerSnapshot();  // Ask synth to emit current values of assigned MIDI CCs (read-only)
     // Play notes on the current slot via the editor protocol (Note, cc=0x17 sc=0x56).
     // The editor talks to the synth's PC port, which ignores regular MIDI notes.
+    // The synth takes these as ONE key, so a press while another note is down
+    // releases that note first (see EditorKey.h).
     void sendNoteOn(int note, int velocity);
     void sendNoteOff(int note);
     void sendRawSysEx(const std::vector<uint8_t>& sysex);       // Fire-and-forget (no ACK needed)
+
+    // OS update (OsUpdate.h). A synth in its boot ROM's update utility answers the greeting
+    // but is not connected: it takes nothing an editor sends but the update, which goes out
+    // as long as the ports are open. greetSynth() asks who is there.
+    bool isInUpdateMode() const { return updateMode; }
+    void greetSynth();
+    void sendOsUpdateMessage(const std::vector<uint8_t>& sysex);
+    // Every frame the synth sends, whole, before it is decoded (the update's answers).
+    std::function<void(const uint8_t*, size_t)> onRawSysEx;
     void sendAckedSysEx(const std::vector<uint8_t>& sysex,
                         bool allowNewPatchInSlotReply = false); // Queued, waits for ACK before next
     bool isAckedQueueIdle() const { return ackedQueue.empty() && !ackedQueueWaiting; }
@@ -88,6 +130,10 @@ public:
     // Slot enable state (fixed LED on hardware; several slots can be enabled
     // at once, independent of which one has focus)
     void setSlotEnabled(int slot, bool enabled);  // Send full mask to synth
+    // Pin exactly these slots, in one message, for loading a slot set. The
+    // focused slot stays enabled whatever this says. Returns false, and asks the
+    // synth for its state, when the current mask is unknown rather than guess.
+    bool setSlotPins(const std::array<bool, 4>& pinned);
     bool isSlotEnabled(int slot) const
     {
         return slot >= 0 && slot < 4 && slotEnabled[static_cast<size_t>(slot)];
@@ -160,6 +206,12 @@ public:
     using UploadCompleteCallback = std::function<void()>;
     void setUploadCompleteCallback(UploadCompleteCallback cb) { uploadCompleteCallback = std::move(cb); }
 
+    // Called when an upload ends without the synth taking it (no ACK in time, or
+    // rejected), with the slot it was going to and why. Unlike the completion
+    // callback above it is not one-shot: whoever shows the slots listens for good.
+    using UploadFailedCallback = std::function<void(int slot, const juce::String& reason)>;
+    void setUploadFailedCallback(UploadFailedCallback cb) { uploadFailedCallback = std::move(cb); }
+
     // Called when synth sends real-time light/meter data (sc=0x39/0x3A)
     // lights: 128 LED values (0-3), meters: 128 meter values (0-127).
     // Like every listener callback here, it arrives on the message thread:
@@ -191,18 +243,40 @@ public:
     void cancelPatchListFetch(const char* reason);  // Abort in-flight list fetch (delivers partial names)
     void resumePatchListIfInterrupted();  // Restart the list fetch if a patch op aborted it earlier
     const std::vector<std::string>& getPatchList() const { return patchListNames; }
+    // A store changes one bank position and the list is not fetched again, so
+    // whoever stores writes the new name in here. Without it the list (and the
+    // MCP bridge's list_bank) goes on showing the position as it was before.
+    void setPatchListName(int section, int position, const std::string& name)
+    {
+        if (section < 0 || section > 8 || position < 0 || position > 98)
+            return;
+        const auto index = static_cast<size_t>(section * 99 + position);
+        if (index < patchListNames.size())
+            patchListNames[index] = name;
+    }
     bool isPatchListLoaded() const { return patchListLoaded; }
 
-    // Bank transfer hooks (one-shot, set by BankTransferManager before each item).
-    // While bankFetchCallback is set, a completed patch fetch is delivered to it
-    // INSTEAD of patchDataCallback, keeping the editor UI out of bulk transfers.
-    using BankFetchCallback = std::function<void(const std::vector<std::vector<uint8_t>>& sections, int slot)>;
-    void setBankFetchCallback(BankFetchCallback cb) { bankFetchCallback = std::move(cb); }
+    // The synth answers a Store with a one-entry patch list (bank, position, name):
+    // that is its word that the patch is in flash (G1originaleditor/notes/16). Whoever
+    // stores asks to be told: true on that entry, false if it does not come in time.
+    using StoreConfirmCallback = std::function<void(bool confirmed)>;
+    void expectStoreConfirmation(int section, int position, StoreConfirmCallback cb,
+                                 int timeoutMs = 4000);
 
+    // Bank transfer hook (one-shot, set by BankTransferManager before each item).
     // While set, upload completion (true) or ACK-timeout abort (false) is
     // delivered here instead of uploadCompleteCallback.
     using BankUploadResultCallback = std::function<void(bool success)>;
     void setBankUploadResultCallback(BankUploadResultCallback cb) { bankUploadResultCallback = std::move(cb); }
+
+    // Ask for the patch stored at a bank position, read from flash without
+    // loading it into a slot. One-shot: the callback gets the patch's 7-bit
+    // stream, or an empty vector when the position holds no patch. A
+    // disconnect drops it without a call; the caller keeps its own watchdog.
+    using FlashDumpCallback = std::function<void(int section, int position,
+                                                 const std::vector<uint8_t>& patchData)>;
+    void requestFlashDump(int section, int position, FlashDumpCallback cb);
+    void cancelFlashDump() { flashDumpCallback = nullptr; flashDumpAccumulator.clear(); }
 
     NmProtocol& getProtocol() { return protocol; }
 
@@ -227,9 +301,16 @@ private:
 
     void setStatus(State state, const juce::String& message);
     void sendNoteEvent(int note, int velocity, bool on);
+    EditorKey editorKey;           // the one editor key the synth has (EditorKey.h)
     void startHandshakeTimeout();
     void sendHandshake();          // IAm, sender=0: the editor introducing itself
     juce::uint32 lastHandshakeMs = 0;  // rate-limits the re-hello in onSynthMessage
+    // When the synth last sent anything at all. After a timeout, checkSynthStillAnswers
+    // compares it with the moment it asked.
+    std::atomic<juce::uint32> lastHeardMs { 0 };
+    void checkSynthStillAnswers(const juce::String& after);
+    void forgetSynthState(const char* why);
+    void notifyUploadFailed(const juce::String& reason);
     void cancelHandshakeTimeout();
     void startSlotDetectionFallback();
     void sendGetPatchMessages(int patchId, int slot);
@@ -243,6 +324,8 @@ private:
     void sendPatchRequest(int slot);   // One RequestPatch attempt, under the retry budget
     void serviceDeferredAutoFetch();   // Run a fetch the wire was too busy to take
 
+    // Cancel delayed work on disconnect, not just destruction. Never re-arm a
+    // captured flag: the next session gets a fresh one.
     std::shared_ptr<std::atomic<bool>> alive { std::make_shared<std::atomic<bool>>(true) };
     NmProtocol protocol;
 
@@ -272,6 +355,11 @@ private:
         ConnectionManager& owner;
     };
     ParamQueueTimer paramQueueTimer_ { *this };
+
+    // Last parameter given focus per slot, with the patch id it was sent under:
+    // a new patch in the slot means the synth's focus is gone, so resend.
+    struct FocusedParam { int pid = -1, section = -1, module = -1, param = -1; };
+    std::array<FocusedParam, 4> focusedParam_ {};
     void drainParamQueue();
     void clearParamQueue();
     // slot < 0 (default) discards the whole queue, for the truly global cases
@@ -302,13 +390,22 @@ private:
     SlotChangedCallback slotChangedCallback;
     SlotsEnabledCallback slotsEnabledCallback;
     UploadCompleteCallback uploadCompleteCallback;
-    BankFetchCallback bankFetchCallback;
+    UploadFailedCallback uploadFailedCallback;
     BankUploadResultCallback bankUploadResultCallback;
+    FlashDumpCallback flashDumpCallback;
+    int flashDumpSection = -1;
+    int flashDumpPosition = -1;
+    std::vector<uint8_t> flashDumpAccumulator;
+    bool takeFlashDumpPacket(const PatchPacketMessage& msg);
+    bool takeFlashDumpEmpty(const AckMessage& msg);
+    void deliverFlashDump(std::vector<uint8_t> patchData);
+    void startUpload(int slot, const Patch& patch, int bankSection, int bankPosition);
     LightMeterCallback lightMeterCallback;
     SynthSettingsCallback synthSettingsCallback;
     PatchLoadProgressCallback patchLoadProgressCallback;
     PatchLoadIncompleteCallback patchLoadIncompleteCallback;
 
+    bool updateMode = false;   // the last IAm came from the update utility
     // Global light/meter arrays updated by synth messages
     int globalLightValues[128] = {};
     int globalMeterValues[128] = {};
@@ -316,7 +413,18 @@ private:
     // Patch request state
     bool waitingForPatchAck = false;
     bool collectingSections = false;
+    // The panel's LEDs do not follow a patch upload: the knob and MIDI-CC lights
+    // only move for the incremental assign/deassign messages. An upload of the
+    // editor's own model therefore replays its assignments once the last packet
+    // is ACKed -- by then the modules they name exist on the synth, which is
+    // what a lone assign needs and why it cannot be sent alongside the upload.
+    struct PanelAssignment { int index; int section; int module; int param; };
+    std::vector<PanelAssignment> uploadKnobAssignments;
+    std::vector<PanelAssignment> uploadCtrlAssignments;
+    void replayPanelAssignments();
+
     bool waitingForUploadAck = false;      // True while waiting for synth ACK after uploadPatch
+    bool uploadWaitsForEditAck = false;    // Upload held until the edit already sent is ACKed (#63)
     bool suppressNextAutoFetch = false;    // Set after upload completes; clears on next NewPatchInSlot
     bool suppressNewPatchInSlot_ = false;  // Set during upload-in-progress
     int pendingSyncEchoes_ = 0;            // Count of expected NewPatchInSlot echoes from sync edits
@@ -325,10 +433,12 @@ private:
     // tested); this class only walks the packet list against the ACK stream.
     std::vector<UploadPacketizer::Packet> uploadPackets;
     void sendNextUploadPacket();
+    void notifyBankUploadResult(bool success);
     // An upload that just stops leaves the synth parked in bulk-receive state,
     // deaf to all MIDI until something closes the transfer (issue #40).
     void closeUploadTransfer(const char* reason);
     int uploadSlot = 0;
+    bool uploadToBank = false;             // The upload names a bank position, not uploadSlot
     int uploadPacketIndex = 0;
     int uploadAckGeneration = 0;
     static constexpr int uploadAckTimeoutMs = 5000;
@@ -382,6 +492,20 @@ private:
     // duplicate cables/parameters in the model).
     std::array<bool, 13> sectionSeen {};
     int fetchPatchId = -1;         // pid the in-flight GetPatch burst was sent with
+    // NmProtocol tag on the GetPatch requests, so a fetch that has gone stale
+    // can take the ones still queued back out.
+    static constexpr int getPatchTag = 1;
+    // The two requests an area with no modules does not need (its parameters and
+    // its names), tagged apart so they can be dropped from the queue once the
+    // module list says the area is empty. The original editor does the same.
+    static constexpr int getPatchCommonTag = 2;
+    void skipEmptyCommonSections();
+    // A load from the synth's front panel announces two pids in a row: the
+    // first NewPatchInSlot is answered by the time the second arrives, and a
+    // GetPatch with the first pid gets a bare ACK and no section. Set when a
+    // newer pid lands on the slot being fetched while its RequestPatch is
+    // still unanswered, so the answer is used to ask again, not to fetch.
+    bool fetchSuperseded = false;
     int sectionRetriesLeft = 0;
     // A synth at 99-100% DSP load answers GetPatch slowly and can stall for
     // seconds mid-fetch (issue #15). Re-requesting the missing sections
@@ -425,6 +549,11 @@ private:
     int patchListSection = 0;      // Current section (0-8) being requested
     int patchListPosition = 0;     // Current position (0-98) being requested
     int patchListGeneration = 0;   // Invalidate old timeouts
+    int pendingStoreSection = -1;  // A Store waiting for the synth's confirmation
+    int pendingStorePosition = -1;
+    int storeGeneration = 0;       // Invalidate old store timeouts
+    StoreConfirmCallback storeConfirmCallback;
+    void finishStoreConfirmation(bool confirmed);
     std::vector<std::string> patchListNames;  // 891 entries (9 banks × 99 positions)
     PatchListCallback patchListCallback;
     // patchListTimeoutMs: 891 patches × one request/response each.

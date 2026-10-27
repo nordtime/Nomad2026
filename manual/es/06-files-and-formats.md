@@ -6,11 +6,18 @@ Los patches son archivos `.pch` en el **formato de texto 3.0** estándar de Nord
 Modular, compatibles con el editor original de Clavia y con Nomad/nmedit. Todo
 lo que guardes en Animatek NME abre en los originales y viceversa.
 
-- **Patches 2.10 antiguos** (el formato viejo `[Module N]`) se cargan de forma
-  transparente, incluidos los cables encadenados y el enrutado correcto de
-  salidas 1/2. Se marcan como **PCH2** en el navegador de presets, y el filtro
-  **PCH2** del navegador los oculta cuando solo quieres los patches actuales. Al
-  guardar se reescriben en formato 3.0.
+- **Patches 2.10 antiguos** (el formato viejo `[Module N]`, del editor 2.x de
+  Clavia; muchos patches de fábrica son 2.10) se convierten como los convierte
+  el editor 3.03 de Clavia: los selectores cuyo 0 era "apagado" pasan a
+  selector más mute o bypass, el encendido invertido de los osciladores pasa al
+  mute de 3.0, se desempaquetan los pasos de los secuenciadores, y se conservan
+  el antiguo módulo de morph, las asignaciones de morph, los mandos, los
+  controladores MIDI y las notas. Se marcan como **PCH2** en el navegador de
+  presets, y el filtro **PCH2** del navegador los oculta cuando solo quieres los
+  patches actuales. Al guardar se reescriben en formato 3.0. Aun así, un patch
+  convertido puede sonar distinto de como lo oía su autor: si uno no suena,
+  mira sus salidas, sus entradas de audio y si espera al reloj MIDI o a que
+  gires un mando (sus notas suelen decirlo).
 - Las **notas de patch** se guardan en una sección `[Notes]`, una extensión de
   Nomad/nmedit que los editores originales ignoran sin causar problemas.
 
@@ -61,13 +68,44 @@ El navegador de disco escanea recursivamente una carpeta configurable de
   Snippets/   snippets exportados
   Presets/    un paquete .pchp de presets por tipo de módulo
   Banks/      carpetas espejo Bank1 … Bank9 de "Backup All Banks"
+  Sets/       sets de slots: una carpeta por set, con sus patches y un manifiesto .nmset
 ```
 
-La búsqueda cubre los nombres de archivo; los filtros acotan a patches, snippets
-o copias de banco. Las copias de banco se cargan como cualquier otro patch.
+La búsqueda cubre los nombres de archivo; los filtros acotan a patches, snippets,
+copias de banco o sets de slots. Las copias de banco se cargan como cualquier
+otro patch; un set se carga en todos los slots que nombra (ver *Sets de slots*
+en el capítulo 4).
+
+## Manifiesto de set `.nmset`
+
+JSON, en la carpeta del set junto a las copias de sus patches:
+
+```json
+{
+  "format": "animatek-nme-slot-set",
+  "version": 1,
+  "name": "Fractura",
+  "notes": "Empieza por A y C.",
+  "focus": "A",
+  "slots": {
+    "A": { "mode": "patch", "file": "A Nucleo Duro.pch",
+           "patchName": "A Nucleo Duro", "enabled": true, "bank": 414 },
+    "B": { "mode": "disable" },
+    "C": { "mode": "keep" }
+  }
+}
+```
+
+`mode` es `patch`, `disable` o `keep`, y un slot que no aparece se deja como
+está. `file` tiene que ser un `.pch` de la misma carpeta: un manifiesto que
+nombre otra cosa, un modo desconocido o una `version` más nueva se rechaza en
+vez de cargarse a medias. `bank` es solo informativo.
 
 ## Carpetas de banco
 
-**Save Bank to Disk** escribe los patches como `NN - Nombre.pch`; el prefijo
-`NN` registra la posición dentro del banco, y **Send Bank to Synth** lo usa para
-restaurar cada patch a su posición exacta.
+**Save Bank to Disk** escribe los patches como `NN - Nombre.pch` y, al lado, un
+`BankN.pchList`: la lista que escribe el editor de Clavia, texto plano con un
+archivo por línea en el orden del banco, donde una línea con un número (`10`)
+salta a esa posición. **Send Bank to Synth** toma la lista (de NME o de Clavia)
+y devuelve cada patch a su posición. Una carpeta sin lista va por el prefijo
+`NN` si todos los archivos lo tienen, y si no, por orden de nombre desde la 1.

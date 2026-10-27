@@ -1,5 +1,7 @@
 #include "NmProtocol.h"
 
+#include <algorithm>
+
 NmProtocol::NmProtocol()
 {
     startTimer(heartbeatIntervalMs);
@@ -21,10 +23,13 @@ void NmProtocol::removeListener(Listener* listener)
 }
 
 void NmProtocol::sendMessage(int cc, int slot, const std::vector<uint8_t>& payload,
-                             bool expectsReply, bool addChecksum)
+                             bool expectsReply, bool addChecksum, int tag)
 {
+    if (!sendFn)
+        return;
+
     auto encoded = SysEx::encode(cc, slot, payload, addChecksum);
-    sendQueue.push_back({ std::move(encoded), expectsReply });
+    sendQueue.push_back({ std::move(encoded), expectsReply, tag });
 
     // Send right away instead of waiting for the next timer tick. The original
     // editor's ProtocolRunner thread drains its queue as soon as a message is
@@ -32,9 +37,33 @@ void NmProtocol::sendMessage(int cc, int slot, const std::vector<uint8_t>& paylo
     flushSendQueue();
 }
 
+int NmProtocol::discardQueued(int tag)
+{
+    const auto before = sendQueue.size();
+    sendQueue.erase(std::remove_if(sendQueue.begin(), sendQueue.end(),
+                                   [tag](const PendingMessage& m) { return m.tag == tag; }),
+                    sendQueue.end());
+    return static_cast<int>(before - sendQueue.size());
+}
+
 void NmProtocol::processIncoming(const uint8_t* data, size_t length)
 {
+    if (!sendFn)
+        return;
+    if (onRawIncoming)
+        onRawIncoming(data, length);
+
     auto msg = SysEx::decode(data, length);
+    if (msg.valid && msg.checksumPresent && !msg.checksumValid)
+    {
+        // The original editor counts these as failures (three in a row is
+        // "Lost contact"). Here it is only logged: dropping them on a
+        // misread flag would cut the link, and nothing is known to fail yet.
+        ++badChecksumCount;
+        DBG("NmProtocol: bad checksum on cc=0x" + juce::String::toHexString(msg.cc)
+            + " (" + juce::String(static_cast<int>(length)) + " bytes, "
+            + juce::String(badChecksumCount) + " so far)");
+    }
     if (msg.valid)
     {
         // Only genuine replies unblock the queue (jnmprotocol isReply()):
@@ -54,7 +83,18 @@ void NmProtocol::processIncoming(const uint8_t* data, size_t length)
 
 void NmProtocol::setSendFunction(std::function<void(const std::vector<uint8_t>&)> fn)
 {
+    sendQueue.clear();
+    waitingForReply = false;
+    lastSendTime = 0;
     sendFn = std::move(fn);
+}
+
+void NmProtocol::sendRawSysEx(const std::vector<uint8_t>& data)
+{
+    // Keep the callable alive if a transport callback detaches itself.
+    const auto sender = sendFn;
+    if (sender)
+        sender(data);
 }
 
 void NmProtocol::timerCallback()
@@ -103,7 +143,7 @@ void NmProtocol::flushSendQueue()
             lastSendTime = juce::Time::getMillisecondCounter();
         }
 
-        sendFn(pending.encoded);
+        sendRawSysEx(pending.encoded);
     }
 }
 

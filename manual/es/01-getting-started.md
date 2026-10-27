@@ -21,7 +21,11 @@
 - *Binario suelto*: descomprime y ejecuta `AnimatekNME`. No hay instalación; los
   ajustes se guardan en tu perfil de usuario.
 
-**Windows.** Descomprime y ejecuta `AnimatekNME.exe`. No hace falta instalador.
+**Windows.** Ejecuta el instalador, `AnimatekNME-x.y.z-windows-setup.exe`: instala
+solo para tu usuario (sin permisos de administrador), pone Animatek NME en el menú
+Inicio y sustituye la versión anterior; se desinstala desde Configuración →
+Aplicaciones. No toca tus ajustes ni tus patches. O descomprime el ZIP y ejecuta
+`AnimatekNME.exe`, sin instalar nada.
 
 **macOS.** Descomprime, mueve `AnimatekNME.app` a Aplicaciones y ábrelo. El
 binario es universal (Apple Silicon + Intel). La primera vez puede que tengas
@@ -35,6 +39,9 @@ que autorizarlo en Ajustes del Sistema → Privacidad y seguridad.
    estado muestra la conexión y el editor descarga el patch del slot activo.
 3. Si tienes varias interfaces MIDI, elige los puertos correctos en las opciones
    del editor.
+   Con el sinte conectado, el diálogo de ajustes MIDI ofrece **Reconnect** (el
+   handshake otra vez, en los puertos elegidos ahí: el mismo sinte u otro, como
+   G1-Emu) y **Disconnect**. Para reconectar no hace falta desconectar antes.
 
 Una vez conectado todo va en vivo: mover un knob en el editor cambia el sonido
 al instante, y mover un knob en el panel frontal actualiza el editor.

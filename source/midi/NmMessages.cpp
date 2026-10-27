@@ -1,4 +1,5 @@
 #include "NmMessages.h"
+#include "OsUpdate.h"
 #include "../model/BitStream.h"
 #include "../model/BitStreamWriter.h"
 
@@ -33,6 +34,7 @@ IAmMessage IAmMessage::decode(const uint8_t* data, size_t length)
         msg.serial = (data[4] << 7) | data[5];
         msg.deviceId = data[6];
     }
+    msg.updateMode = OsUpdate::isUpdateModeIAm(data, length);
 
     return msg;
 }
@@ -51,6 +53,18 @@ std::vector<uint8_t> ParameterChangeMessage::encode() const
         static_cast<uint8_t>(module & 0x7F),
         static_cast<uint8_t>(parameter & 0x7F),
         static_cast<uint8_t>(value & 0x7F)
+    };
+}
+
+std::vector<uint8_t> ParameterFocusMessage::encode() const
+{
+    return {
+        static_cast<uint8_t>(pid & 0x7F),
+        static_cast<uint8_t>(0x2F),               // sc = ParamFocus
+        static_cast<uint8_t>(0x00),
+        static_cast<uint8_t>(section & 0x7F),
+        static_cast<uint8_t>(module & 0x7F),
+        static_cast<uint8_t>(parameter & 0x7F)
     };
 }
 
@@ -308,6 +322,35 @@ std::vector<uint8_t> GetPatchListMessage::encode() const
         static_cast<uint8_t>(section & 0x7F),
         static_cast<uint8_t>(position & 0x7F)
     };
+}
+
+// --- FlashDumpRequestMessage ---
+// PatchHandling(cc=0x17) -> PatchCommand(pp=0x41) -> FlashDumpRequest(ssc=0x17)
+//       -> section:7, position:7. Sent with cc=0x17, has checksum.
+
+std::vector<uint8_t> FlashDumpRequestMessage::encode() const
+{
+    return {
+        0x41,                                           // pp = PatchManagerCommand
+        0x17,                                           // ssc = FlashDumpRequest
+        static_cast<uint8_t>(section & 0x7F),
+        static_cast<uint8_t>(position & 0x7F)
+    };
+}
+
+// --- FlashDumpReply ---
+// 0x18 := 02:8 section:8 position:8 String$name, then the patch sections.
+
+bool FlashDumpReply::peek(const std::vector<uint8_t>& patchData, FlashDumpReply& out)
+{
+    BitStream bs(patchData);
+    if (bs.remaining() < 32)
+        return false;
+    if (bs.readBits(8) != 0x18 || bs.readBits(8) != 0x02)
+        return false;
+    out.section = static_cast<int>(bs.readBits(8));
+    out.position = static_cast<int>(bs.readBits(8));
+    return out.section < 9 && out.position < 99;
 }
 
 // --- PatchListResponseMessage ---

@@ -1,4 +1,5 @@
 #include "ThemeRegistry.h"
+#include "ThemeFile.h"
 
 #include <vector>
 
@@ -49,6 +50,7 @@ ColorScheme makeCanvas(const PaletteSpec& p)
     s.moduleText       = p.fg0.withAlpha(0.87f);
     s.groupBoxBorder   = p.bg4;
 
+    s.knobArc          = p.blue;
     s.knobBase         = p.fg1;
     s.knobBorder       = p.bg4;
     s.knobGrip         = p.bg1;
@@ -201,6 +203,26 @@ const PaletteSpec kNordClassic = {
     juce::Colour(0xff5a5fb3), juce::Colour(0xffcf7a3a), juce::Colour(0xff9a5fb3),
 };
 
+// "Animatek Rack": the colours of the Animatek modules for VCV Rack: bluish
+// graphite panels (#2A2F3A body, #33384A raised parts), pale blue-grey text
+// (#C8D4E3), and the style guide's accents: blue #2C7FFF (primary), orange
+// #FD9A00 (secondary), green #24B979, purple #C084FC, rose #FB7185.
+const PaletteSpec kAnimatekRack = {
+    juce::Colour(0xff181a21), juce::Colour(0xff1f222b), juce::Colour(0xff2a2f3a),
+    juce::Colour(0xff33384a), juce::Colour(0xff4a5068),
+    juce::Colour(0xffc8d4e3), juce::Colour(0xff9aa2b5), juce::Colour(0xff6b7389),
+    juce::Colour(0xfffb7185), juce::Colour(0xff24b979), juce::Colour(0xfff5c542),
+    juce::Colour(0xff2c7fff), juce::Colour(0xfffd9a00), juce::Colour(0xffc084fc),
+};
+
+ColorScheme makeAnimatekRack()
+{
+    ColorScheme s = makeCanvas(kAnimatekRack);
+    s.displayText = juce::Colour(0xff5db7ff);   // the modules' display blue
+    s.knobArc     = juce::Colour(0xff2c7fff);
+    return s;
+}
+
 ColorScheme makeNordClassic()
 {
     ColorScheme s = makeCanvas(kNordClassic);
@@ -210,6 +232,7 @@ ColorScheme makeNordClassic()
 
     // Knobs: medium-dark grey dial like the original — NOT tied to the (now very
     // dark) text colour, which turned the knobs near-black. Light grip for contrast.
+    s.knobArc    = juce::Colour(0xff4a3fb0);   // indigo, as the LCD readouts
     s.knobBase   = juce::Colour(0xff8f8f8f);
     s.knobBorder = juce::Colour(0xff4a4a4a);
     s.knobGrip   = juce::Colour(0xff202020);
@@ -260,25 +283,91 @@ AppThemePalette makeNordClassicApp()
 
 // Theme menu items use IDs 200+ in MainComponent's View menu (see getMenuForIndex
 // / menuItemSelected), so the registry can grow freely.
-const std::vector<EditorTheme>& themes()
+std::vector<EditorTheme>& builtinList()
 {
-    static const std::vector<EditorTheme> list = {
-        { "Nomad",            AppTheme::palette(AppThemeId::SoftDarkGrey), createClassicTheme },
-        { "Dark",             AppTheme::palette(AppThemeId::SoftDarkGrey), createDarkTheme },
-        { "Deep Dark",        AppTheme::palette(AppThemeId::DeepDarkGrey), createDarkTheme },
-        { "Tokyo Night",      makeApp(kTokyoNight),      []{ return makeCanvas(kTokyoNight); } },
-        { "Gruvbox Dark",     makeApp(kGruvboxDark),     []{ return makeCanvas(kGruvboxDark); } },
-        { "Dracula",          makeApp(kDracula),         []{ return makeCanvas(kDracula); } },
-        { "Nord",             makeApp(kNord),            []{ return makeCanvas(kNord); } },
-        { "Ghosty",           makeApp(kGhosty),          []{ return makeCanvas(kGhosty); } },
-        { "Magnetic Revival", makeApp(kMagneticRevival), []{ return makeCanvas(kMagneticRevival); } },
-        { "MothWig",          makeApp(kMothWig),         []{ return makeCanvas(kMothWig); } },
-        { "Macchiato",        makeApp(kMacchiato),       []{ return makeCanvas(kMacchiato); } },
-        { "Cubitwig",         makeApp(kCubitwig),        []{ return makeCanvas(kCubitwig); } },
-        { "Nord Classic",     makeNordClassicApp(),      makeNordClassic },
+    static std::vector<EditorTheme> list = {
+        { "Nomad",            AppTheme::palette(AppThemeId::SoftDarkGrey), createClassicTheme, {}, false },
+        { "Dark",             AppTheme::palette(AppThemeId::SoftDarkGrey), createDarkTheme, {}, false },
+        { "Deep Dark",        AppTheme::palette(AppThemeId::DeepDarkGrey), createDarkTheme, {}, false },
+        { "Tokyo Night",      makeApp(kTokyoNight),      []{ return makeCanvas(kTokyoNight); }, {}, false },
+        { "Gruvbox Dark",     makeApp(kGruvboxDark),     []{ return makeCanvas(kGruvboxDark); }, {}, false },
+        { "Dracula",          makeApp(kDracula),         []{ return makeCanvas(kDracula); }, {}, false },
+        { "Nord",             makeApp(kNord),            []{ return makeCanvas(kNord); }, {}, false },
+        { "Ghosty",           makeApp(kGhosty),          []{ return makeCanvas(kGhosty); }, {}, false },
+        { "Magnetic Revival", makeApp(kMagneticRevival), []{ return makeCanvas(kMagneticRevival); }, {}, false },
+        { "MothWig",          makeApp(kMothWig),         []{ return makeCanvas(kMothWig); }, {}, false },
+        { "Macchiato",        makeApp(kMacchiato),       []{ return makeCanvas(kMacchiato); }, {}, false },
+        { "Cubitwig",         makeApp(kCubitwig),        []{ return makeCanvas(kCubitwig); }, {}, false },
+        { "Nord Classic",     makeNordClassicApp(),      makeNordClassic, {}, false },
+        // Drawn for flat knobs, as on the Rack modules, so it turns them on when chosen.
+        { "Animatek Rack",    makeApp(kAnimatekRack),    makeAnimatekRack,
+          ThemeRender { {}, {}, true, {} }, false },
     };
     return list;
 }
+
+// Built-ins first, then the user's: a name that is already taken gets " (user)".
+std::vector<EditorTheme>& allThemes()
+{
+    static std::vector<EditorTheme> all = [] {
+        auto v = builtinList();
+        const auto base = v[1];   // "Dark"
+        ThemeRegistry::mergeUserThemes(v, ThemeFile::loadFolder(ThemeFile::userFolder(), base));
+        return v;
+    }();
+    return all;
+}
+
+const std::vector<EditorTheme>& themes() { return allThemes(); }
+}
+
+int ThemeRegistry::builtinCount()
+{
+    return static_cast<int>(builtinList().size());
+}
+
+void ThemeRegistry::reloadUserThemes()
+{
+    auto& all = allThemes();
+    all.resize(static_cast<size_t>(builtinCount()));
+    for (size_t i = 0; i < all.size(); ++i)   // put back built-ins an official file replaced
+        all[i] = builtinList()[i];
+    const auto base = all[1];
+    mergeUserThemes(all, ThemeFile::loadFolder(ThemeFile::userFolder(), base));
+}
+
+void ThemeRegistry::mergeUserThemes(std::vector<EditorTheme>& all, std::vector<EditorTheme> user)
+{
+    const auto builtins = static_cast<size_t>(builtinCount());
+    for (auto& t : user)
+    {
+        bool placed = false;
+        if (t.official)
+            for (size_t i = 0; i < builtins && i < all.size(); ++i)
+                if (all[i].name == t.name) { all[i] = std::move(t); placed = true; break; }
+        if (placed)
+            continue;
+        for (const auto& other : all)
+            if (other.name.equalsIgnoreCase(t.name)) { t.name += " (user)"; break; }
+        all.push_back(std::move(t));
+    }
+}
+
+int ThemeRegistry::indexOfName(const juce::String& name)
+{
+    const auto& list = themes();
+    for (size_t i = 0; i < list.size(); ++i)
+        if (list[i].name == name)
+            return static_cast<int>(i);
+    return -1;
+}
+
+const EditorTheme* ThemeRegistry::findBuiltin(const juce::String& name)
+{
+    for (const auto& t : builtinList())
+        if (t.name == name)
+            return &t;
+    return nullptr;
 }
 
 int ThemeRegistry::count()
@@ -300,4 +389,23 @@ juce::StringArray ThemeRegistry::names()
     for (const auto& t : themes())
         out.add(t.name);
     return out;
+}
+
+RenderStyle ThemeRegistry::switchRender(const RenderStyle& current, std::optional<RenderStyle>& saved,
+                                        const ThemeRender& next)
+{
+    if (next.any())
+    {
+        if (!saved)
+            saved = current;
+        // Over the user's own style, so one theme's keys never carry into the next.
+        return next.over(*saved);
+    }
+    if (saved)
+    {
+        const auto mine = *saved;
+        saved.reset();
+        return mine;
+    }
+    return current;
 }

@@ -10,26 +10,33 @@
 #include "model/Patch.h"
 #include "model/PatchVariations.h"
 #include "model/PatchExtras.h"
+#include "model/SlotSet.h"
 #include "model/PchFileIO.h"
 #include "model/SnipFileIO.h"
 #include "model/SynthSettings.h"
-#include "midi/ConnectionManager.h"
+#include "midi/SynthHub.h"
 #include "sync/BankTransferManager.h"
 #include "sync/PatchSynchronizer.h"
 #include "undo/PatchActions.h"
 #include "ui/MainLayout.h"
 #include "ui/EditorOptionsDialog.h"
+#include "ui/PatchSettingsDialog.h"
+#include "ui/ShortcutsDialog.h"
+#include "ui/ThemesDialog.h"
 #include "ui/PresetBrowserWindow.h"
 #include "ui/KnobFloaterWindow.h"
 #include "ui/KeyboardFloaterWindow.h"
 #include "ui/PatchNotesFloaterWindow.h"
 #include "ui/MutatorWindow.h"
 #include "ui/SysexMonitorWindow.h"
+#include "mcp/McpEventLog.h"
+#include <array>
 #if NME_MCP_BRIDGE
 #include "mcp/McpBridgeServer.h"
 #endif
 
 class SynthSettingsDialog;
+class MidiSettingsDialog;
 
 class MainComponent : public juce::Component,
                       public juce::MenuBarModel
@@ -49,10 +56,18 @@ public:
 
     ModuleDescriptions& getModuleDescriptions() { return moduleDescs; }
 
+    // DAW project recall (the plugin, #94): the patch in every slot and the slot on screen,
+    // as a block the host keeps in the project. Restoring puts the patches back in the
+    // editor only (LOCAL): nothing is sent to the synth, because a project opening is not a
+    // reason to overwrite what is on a real G1.
+    juce::MemoryBlock captureSessionState();
+    void restoreSessionState(const juce::MemoryBlock& block);
+
     // Small slot-indexed accessors for McpRequestHandler (source/mcp/), which
     // needs to reach a specific slot's model/undo state without duplicating
     // MainComponent's own slot-lookup logic or requiring friend access.
     int getActiveSlot() const { return activeSlot; }
+    int getActiveSynth() const { return synthHub.activeSynth(); }
     Patch* getSlotPatch(int slot) const { return slotPatches[slot].get(); }
     const juce::File& getSlotPatchFile(int slot) const { return slotPatchFiles[slot]; }
     juce::File getPatchesFolder() const { return editorOptions.getPatchesFolder(); }
@@ -69,7 +84,7 @@ public:
     UndoContext* getSlotUndoContext(int slot) const { return slotUndoContexts[slot].get(); }
     bool isPatchTransferInProgress() const
     {
-        return connectionManager.isUploadingPatch() || connectionManager.isFetchingPatch();
+        return synthHub.active().isUploadingPatch() || synthHub.active().isFetchingPatch();
     }
     const juce::File& getPresetLibraryRoot() const { return editorOptions.presetLibraryRoot; }
     bool createEmptyPatchInSlot(int slot, const juce::String& name, bool activate,
@@ -77,6 +92,44 @@ public:
     bool loadPatchFileIntoSlot(int slot, const juce::File& file, bool activate,
                                juce::String& error);
     void prepareSlotModuleDeletion(int slot);
+
+    // What the editor already knows about the synth, for the MCP bridge's
+    // read-back tools (get_synth_status, read_lights, get_events). Nothing here
+    // asks the synth anything: it is the state the UI was already drawing from,
+    // made visible to a client that cannot see the screen.
+    const ConnectionManager& getConnectionManager() const { return synthHub.active(); }
+    BankTransferManager& getBankTransfer() { return bankTransfer; }
+    bool isSlotLocal(int slot) const { return slot >= 0 && slot < numSlots && slotIsLocal[slot]; }
+    bool isSlotEnableStateKnown() const { return activeState().enableStateKnown; }
+    const std::array<bool, 4>& getLastEnabledSlots() const { return activeState().lastEnabled; }
+    const std::array<int, 4>& getSynthVoiceCounts() const { return activeState().voiceCounts; }
+    const SynthSettings& getCachedSynthSettings() const { return activeState().settings; }
+    // False from a disconnect until the synth that answers next sends its settings.
+    bool areSynthSettingsFromThisConnection() const { return activeState().settingsKnown; }
+    const ThemeData& getThemeData() const { return themeData; }
+    struct LightMeterFrame
+    {
+        std::array<int, 128> lights {};
+        std::array<int, 128> meters {};
+        int slot = -1;              // the slot that had synth focus when it arrived
+        juce::int64 timeMs = 0;     // 0 = no frame since the editor started
+    };
+    const LightMeterFrame& getLastLightMeterFrame() const { return activeState().lastLightFrame; }
+    McpEventLog& getMcpEventLog() { return mcpEventLog; }
+    // A morph group's dial, by the same path as dragging it in the header bar.
+    bool setSlotMorphValue(int slot, int group, int value, juce::String& error);
+    // Sound a note on the synth's focused slot, released after durationMs.
+    bool playNoteOnSynth(int note, int durationMs, juce::String& error);
+    // The MCP bridge's connection tools, by the same paths as the MIDI settings
+    // dialog (which also remembers the ports once the synth answers) and the
+    // "reload the patch from the synth" command.
+    void connectToPorts(const juce::String& inputId, const juce::String& outputId) { handleConnectionRequest(synthHub.activeSynth(), inputId, outputId); }
+    void disconnectFromSynth() { handleDisconnectionRequest(synthHub.activeSynth()); }
+    const juce::String& getLastInputId() const { return activeState().lastInputId; }
+    const juce::String& getLastOutputId() const { return activeState().lastOutputId; }
+    // Ask the synth for the patch in a slot again; the editor's copy of that slot is
+    // replaced when it arrives, like any fetch.
+    bool refetchSlotFromSynth(int slot, juce::String& error);
 
 private:
     // The four slot canvases. There is deliberately no "the canvas" accessor:
@@ -100,6 +153,7 @@ private:
     void quickStoreToBank();
     // Tell the synth to write a slot's patch into a bank location, remember it
     // as that slot's home, and say so in the status bar.
+    void storeAndReport(int slot, int section, int position);
     void sendStoreToBank(int slot, int section, int position);
     // Work out where a synth-fetched patch lives by looking its name up in the
     // bank list, for the case the synth never told us (a patch already sitting
@@ -114,10 +168,44 @@ private:
     // Opening a .pch shows the slot chooser (issue #21); the chosen destination
     // and Local flag are then applied by loadPatchFromFile.
     void openPatchFileWithChooser(const juce::File& file);
+    static void applyInterfaceScale(float scale);
     void loadPatchFromFile(const juce::File& file, int targetSlot, bool localOnly);
     bool replacePatchInSlot(int slot, std::unique_ptr<Patch> patch,
                             const juce::File& sourceFile, bool activate,
                             bool loadVariations, juce::String& error);
+
+    // ── Slot sets ──────────────────────────────────────────────────────────
+    // A named group of patches for the four slots, kept as a folder in the
+    // library's Sets/ (model/SlotSet.h). In MainComponentSlotSets.cpp.
+    void saveSlotSet();
+    void writeSlotSet(const juce::String& name, const juce::String& notes,
+                      const std::array<SlotSet::Mode, 4>& modes, bool overwrite);
+    void openSlotSetWithChooser();
+    void loadSlotSet(const juce::File& manifest);   // says what it will do, then loads
+    void startSlotSetLoad(const SlotSet& set, const juce::File& folder);
+    void slotSetLoadTick();
+    void finishSlotSetLoad();
+    struct SlotSetLoad
+    {
+        enum class Stage { Patches, Focus, Enable };
+        bool active = false;
+        int synth = 0;                 // the synth the whole load is for
+        Stage stage = Stage::Patches;
+        SlotSet set;
+        juce::File folder;
+        std::vector<int> pending;      // slots still to load, A to D
+        int current = -1;              // the slot whose load is in flight
+        bool uploading = false;        // that load went to the synth: wait for its ACK
+        bool uploadAcked = false;
+        int quietTicks = 0;            // ticks the upload has been over without an ACK
+        int stepTicks = 0;             // ticks spent on the current step
+        int settleTicks = 0;           // ticks to wait before the next step
+        std::array<bool, 4> mask {};   // the enable state to leave behind
+        juce::StringArray loaded;
+        juce::StringArray failed;
+    };
+    SlotSetLoad slotSetLoad;
+    std::unique_ptr<juce::Timer> slotSetLoadTimer;
     void importSnippet();
     void importSnippetFromFile(int slot, const juce::File& file);
     void importSnippetFromFile(int slot, const juce::File& file, int targetGridX, int targetGridY);
@@ -132,6 +220,38 @@ private:
     juce::String getMcpBridgeCommand() const;
 #endif
     void applyUiTheme(int index, bool persist);
+    // The user picks a theme: applyUiTheme plus the render style the theme sets (#90).
+    void chooseUiTheme(int index);
+    // Ctrl+T, whoever has the keyboard: the main window and the floaters take it as a key press; an open
+    // menu or a dialog swallows it, so a light timer watches the keyboard for those
+    void cycleUiThemeFromKey();
+    // Developer aid: with NME_SNAPSHOT_DIR set, the editor saves PNGs of its own windows (drawn by JUCE,
+    // so nothing on the desktop is captured, on Wayland too) and quits
+    void saveSnapshotsAndQuit(const juce::File& dir);
+    // The menu bar's menus, one after another, then on to saveSnapshotsAndQuit
+    void snapshotMenus(const juce::File& dir, int index);
+    std::unique_ptr<juce::Timer> themeKeyTimer;
+    juce::uint32 lastThemeKeyMs = 0;
+    bool themeKeyWasDown = false;
+    void importThemeFile();
+    void exportCurrentTheme();
+    void loadCommunityIndexCache();
+    void checkCommunityThemes(bool userAsked);
+    int communityNewCount() const;
+    void showCommunityThemes();
+    void refreshCommunityThemesWindow();
+    // The one window of everything about themes (View > Themes...): opens it on a page, or moves to it
+    void showThemesDialog(ThemesDialog::Page page);
+    // Hands it the list of themes and which one is in use
+    void syncThemesDialog();
+    void installCommunityTheme(const CommunityThemes::Entry& entry);
+    // New version notice (#97): a newer release tag than this build, and whether the
+    // user has not opened its menu item yet (that is what the red dot on About means).
+    void checkNewVersion();
+    bool newVersionOut() const;
+    bool newVersionUnseen() const;
+    void applyThemeLive(const EditorTheme& theme);   // theme editor preview, not in the registry
+    void showThemeEditor();
     void toggleWireframe();
     void toggleLeftPanel();   // Ctrl+I: inspector column (issue #38)
     void toggleRightPanel();  // Ctrl+Shift+I: patch browser
@@ -160,17 +280,13 @@ private:
     // After that the windows are the user's to open and close; the enable mask
     // is a single slot most of the time and changes on every slot press, so
     // following it live would keep closing everything but one.
-    void scheduleSlotWindowReconcile();
-    void reconcileSlotWindowsWithSynth(const std::array<bool, 4>& enabled);
+    void scheduleSlotWindowReconcile(int synth);
+    void reconcileSlotWindowsWithSynth(int synth, const std::array<bool, 4>& enabled);
     // Starts true: the constructor opens a slot before restoreMdiLayout() runs,
     // and that fires onLayoutChanged, which would save the default layout over
     // the stored one before it was ever read. Cleared when restore finishes.
     bool restoringMdiLayout = true;
     bool syncingSlotWindows = false;
-    std::array<bool, 4> lastEnabledSlots {};
-    bool slotEnableStateKnown = false;
-    bool slotWindowsReconciled = false;
-    bool slotWindowsReconcileScheduled = false;
 
     void showMidiSettingsDialog();
     void showPatchSettingsDialog();
@@ -256,25 +372,38 @@ private:
         parameters, so anything that moves a morph value has to say so here or
         those cells sit at whatever they last read (issue #64). */
     void refreshKnobFloater();
-    void handleConnectionRequest(const juce::String& inputId, const juce::String& outputId);
-    void handleDisconnectionRequest();
-    void onConnectionStatusChanged(const ConnectionManager::Status& status);
-    void attemptAutoConnect();
-    void saveMidiSettings(const juce::String& inputId, const juce::String& outputId);
+    void handleConnectionRequest(int synth, const juce::String& inputId, const juce::String& outputId);
+    void handleDisconnectionRequest(int synth);
+    void onConnectionStatusChanged(int synth, const ConnectionManager::Status& status);
+    void attemptAutoConnect();            // every port saved as enabled
+  public:
+    void scanForEmulators();              // G1-Emu instances on their direct link (#83)
+  private:
+    bool autoConnectEmulatorsEnabled() const;
+    bool isPortFreeForEmulator(int synth) const;
+    void connectFoundEmulators(const std::vector<DirectLink::Instance>& found);
+    std::unique_ptr<juce::Timer> emulatorScanTimer;
+    bool emulatorScanRunning = false;
+    void attemptAutoConnect(int synth);
+    void saveMidiSettings(int synth, const juce::String& inputId, const juce::String& outputId);
     void openURL(const juce::String& url);
 
     juce::ApplicationProperties& appProperties;
     ModuleDescriptions moduleDescs;
     ModulePresetLibrary modulePresets;
     ThemeData themeData;
-    ConnectionManager connectionManager;
-    BankTransferManager bankTransfer { connectionManager, moduleDescs };
+    SynthHub synthHub;
+    BankTransferManager bankTransfer { synthHub.active(), moduleDescs };
     std::unique_ptr<MainLayout> mainLayout;
     std::unique_ptr<juce::MenuBarComponent> menuBar;
 
     // Multi-slot state (4 slots: A/B/C/D)
-    static constexpr int numSlots = 4;
+    static constexpr int numSlots = kTotalSlots;   // global slots: synth * 4 + slot
     std::unique_ptr<Patch> slotPatches[numSlots];
+    // Bumped every time a slot's patch object is replaced, so deferred work
+    // scheduled for the old one (a delayed upload, say) can tell that it is
+    // stale instead of pushing the wrong sound at the synth.
+    int slotPatchGeneration[numSlots] {};
     juce::File slotPatchFiles[numSlots];
     std::unique_ptr<PatchSynchronizer> slotSynchronizers[numSlots];
     juce::UndoManager slotUndoManagers[numSlots];
@@ -299,6 +428,13 @@ private:
     EditorOptions editorOptions;
     std::unique_ptr<PresetBrowserWindow> presetBrowserWindow;
     std::unique_ptr<KnobFloaterWindow> knobFloaterWindow;
+    // Community themes (#91): the last list read from animatek/nme-themes (also cached on
+    // disk, so the menu can mark new ones before the network answers).
+    juce::Component::SafePointer<ThemesDialog> themesDialog;
+    std::vector<CommunityThemes::Entry> communityThemes;
+    juce::StringArray communitySeenWhenOpened;   // the "New" badges in the open window
+    bool communityBusy = false;
+    juce::String communityStatus;
     std::unique_ptr<KeyboardFloaterWindow> keyboardFloaterWindow;
     std::unique_ptr<PatchNotesFloaterWindow> patchNotesFloaterWindow;
     std::unique_ptr<MutatorWindow> mutatorWindow;
@@ -311,10 +447,42 @@ private:
     std::unique_ptr<McpBridgeServer> mcpBridgeServer;
 #endif
 
-    // Last-known global synth settings.
-    SynthSettings cachedSynthSettings;
+    // What the editor knows about each synth, one entry per port. The accessors above
+    // and the dialogs read the active synth's; a synth's own callbacks write theirs.
+    struct SynthState
+    {
+        SynthSettings settings;              // its last-known global settings
+        bool settingsKnown = false;          // false from a disconnect until it sends them again
+        // Last voice counts, light frame and slot enable state, kept for the MCP
+        // bridge. Written on the message thread.
+        std::array<int, 4> voiceCounts {};
+        LightMeterFrame lastLightFrame;
+        std::array<bool, 4> lastEnabled {};
+        bool enableStateKnown = false;
+        bool windowsReconciled = false;
+        bool windowsReconcileScheduled = false;
+        juce::String lastInputId, lastOutputId;   // ports of its last good connection
+        int autoConnectRetries = 5;
+        bool autoNameTried = false;   // the editor named this emulator already, this connection
+    };
+    std::array<SynthState, kMaxSynths> synthState;
+    SynthState& activeState() { return synthState[static_cast<size_t>(synthHub.activeSynth())]; }
+    const SynthState& activeState() const { return synthState[static_cast<size_t>(synthHub.activeSynth())]; }
+    template <typename F> void forEachSynth(F&& f)
+    {
+        for (int s = 0; s < kMaxSynths; ++s)
+            f(s, synthHub.synth(s));
+    }
+
+    McpEventLog mcpEventLog;
     bool pendingSynthSettingsDialogOpen = false;
     juce::Component::SafePointer<SynthSettingsDialog> synthSettingsDialog;
+    // Open while the MIDI settings dialog is; told of every connection change.
+    juce::Component::SafePointer<MidiSettingsDialog> midiSettingsDialog;
+    // The same for the other windows a button or a shortcut opens: asking again closes it, not a second one
+    juce::Component::SafePointer<PatchSettingsDialog> patchSettingsDialog;
+    juce::Component::SafePointer<EditorOptionsDialog> editorOptionsDialog;
+    juce::Component::SafePointer<ShortcutsDialog> shortcutsDialog;
 
     // Convenience accessors for current slot
     std::unique_ptr<Patch>& currentPatch() { return slotPatches[activeSlot]; }
@@ -329,6 +497,17 @@ private:
     // Telling the synth which slot to focus is debounced: walking focus across
     // four sub-windows must not spray SlotActivated messages down the wire.
     void notifySynthOfSlot(int slot);
+    void refreshForActiveSynth();
+    bool isSynthShown(int synth) const;
+    int  slotsOfSynth(int synth) const;   // the Micro Modular's one, or the rack's four
+    bool slotExists(int slot) const;      // false for the slots a Micro does not have
+    void updateSlotBarRows();
+    // A synth's name where the user sees it: its row in the slot bar and its slot windows.
+    void setSynthDisplayName(int synth, const juce::String& name);
+    void renameSynth(int synth);   // double-click on its name in the slot bar
+    // An emulator connected by the editor itself that still has its factory name, or answers to a
+    // name another connected synth has, gets a name of its own. True when it was renamed.
+    bool giveDuplicateEmulatorAName(int synth);
     // Zero a canvas's LEDs and meters. The synth streams them for one slot at a
     // time, so the slot being left has to be blanked or it freezes lit.
     void clearLightMeterData(int slot);
@@ -336,6 +515,7 @@ private:
     int  synthSlotGeneration = 0;
     bool inSlotFocusChange = false;   // switchToSlot -> focusSlot -> onSlotFocused
     void updateDspLoadDisplay();
+  float synthDspLoad(int synth) const;
 
     // Module presets. wirePresetCallbacks() serves both the main window's
     // inspector and a slot window's, since the two are the same class driving
@@ -348,6 +528,9 @@ private:
     // After a save or a delete, every open inspector redraws its preset list, so
     // two windows showing the same module never disagree about what exists.
     void refreshInspectorPresets();
+    // Deassign on the synth whatever the incoming sweep dropped: the panel's
+    // LEDs do not follow a patch, only the incremental assignment messages.
+    void clearDroppedPanelAssignments(int slot);
     void rebuildUndoContext(int slot);  // call after patch change
     // Modules an undo has just put back, filled by UndoContext::onModuleRestored
     // while the undo runs and read once it finishes: undoing a delete hands the
@@ -410,9 +593,6 @@ private:
     int morphKnobIndex = -1;    // physical knob (0..22) assigned as the fader carrier, -1 = none
     int morphKnobMin = 0, morphKnobMax = 127;   // range of the learned knob's param
 
-    juce::String lastInputId;
-    juce::String lastOutputId;
-    int autoConnectRetries = 5;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

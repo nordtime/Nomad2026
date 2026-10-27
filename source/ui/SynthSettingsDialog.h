@@ -1,5 +1,7 @@
 #pragma once
 
+#include "AppTheme.h"
+
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../model/SynthSettings.h"
 #include "FlatCloseButton.h"
@@ -12,7 +14,10 @@ public:
     SynthSettingsDialog (const SynthSettings& current, Callback onOk);
 
     void setSettings (const SynthSettings& settings);
+    // Closes it from outside, as its own close does; a second press of the button that opened it
+    void dismiss() { close(); }
     void paint   (juce::Graphics& g) override;
+    void paintOverChildren (juce::Graphics& g) override { AppTheme::drawWindowFrame (g, getLocalBounds()); }
     void resized () override;
     bool keyPressed (const juce::KeyPress& key) override;
     void mouseDown  (const juce::MouseEvent& e) override;
@@ -57,7 +62,8 @@ private:
     juce::ToggleButton clockInt { "Internal" }, clockExt { "External" };
     juce::Label  bpmLbl       { {}, "BPM" };
     juce::Slider bpmSlider;
-    juce::ToggleButton globalSyncTgl { "Global Sync" };
+    juce::Label  globalSyncLbl { {}, "Global Sync" };
+    juce::Slider globalSyncSlider;   // quarter notes, 1-32
 
     // ── Behavior ──
     juce::Label  behavHdr     { {}, "BEHAVIOR" };

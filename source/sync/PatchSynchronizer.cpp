@@ -115,6 +115,13 @@ void PatchSynchronizer::onCableAdded(int section, Connector* output, Connector* 
     bool outIsOutput = output->getDescriptor()->isOutput;
     bool inIsOutput = input->getDescriptor()->isOutput;
     SignalType color = output->getDescriptor()->signalType;
+    // The colour the canvas draws and a save writes: a chained cable follows its net's source
+    for (const auto& c : container.getConnections())
+        if (c.output == output && c.input == input)
+        {
+            color = container.colourOf(c);
+            break;
+        }
 
     // Create and send message
     // Protocol convention (from Java reference): destination (input) first, source (output) second
@@ -271,8 +278,16 @@ void PatchSynchronizer::onModuleAdded(int section, Module* module)
             paramValues.push_back(param.getValue());
     }
 
-    // Custom values (empty for most modules)
+    // Custom-class values (sequencer events, OscA's frequency-display unit, the
+    // clock-divider readouts). Descriptor order, zeros included: the CustomDump
+    // is positional, so a skipped zero shifts every later value. Sending none at
+    // all left the synth to invent its own defaults for the module we just added.
+    // Encoding and byte-for-byte agreement with jnmprotocol's reference OscA
+    // packet are covered by tests/test_new_module_message.cpp.
     std::vector<int> customValues;
+    for (auto& param : module->getParameters())
+        if (param.getDescriptor()->paramClass == "custom")
+            customValues.push_back(param.getValue());
 
     // Build and send NewModuleMessage
     NewModuleMessageProto msg(pid, typeId, section, moduleIndex,

@@ -38,6 +38,8 @@ public:
     using CustomParameterChangeCallback = std::function<void(int section, int moduleId, int parameterId, int oldValue, int newValue)>;
     using ModuleDropCallback = std::function<void(int typeId, int section, int gridX, int gridY, const juce::String& name)>;
     using DeleteModuleCallback = std::function<void(int section, Module* module)>;
+    // Replace a module by another type of its family: section, module, new type index
+    using ReplaceModuleCallback = std::function<void(int section, Module* module, int newTypeId)>;
     using RenameModuleCallback = std::function<void(int section, Module* module, const juce::String& oldName, const juce::String& newName)>;
     using ModuleSelectedCallback = std::function<void(Module* module, int section)>;
     // Module move callback for undo: section, moduleIndex, oldPos, newPos
@@ -103,6 +105,8 @@ public:
     void setZoomLevel(float z, juce::Point<int> anchor = {});
     void zoomToSelection();
     void resetZoom();
+    // Z: the first press zooms to the selection and remembers where it was, the next one goes back there
+    void toggleZoomToSelection();
     void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
     // Trackpad pinch (macOS, and any platform JUCE feeds magnify events from).
     void mouseMagnify(const juce::MouseEvent& e, float scaleFactor) override;
@@ -149,6 +153,7 @@ public:
     void setCustomParameterChangeCallback(CustomParameterChangeCallback cb) { customParameterChangeCallback = std::move(cb); }
     void setModuleDropCallback(ModuleDropCallback cb) { moduleDropCallback = std::move(cb); }
     void setDeleteModuleCallback(DeleteModuleCallback cb) { deleteModuleCallback = std::move(cb); }
+    void setReplaceModuleCallback(ReplaceModuleCallback cb) { replaceModuleCallback = std::move(cb); }
     void setRenameModuleCallback(RenameModuleCallback cb) { renameModuleCallback = std::move(cb); }
     void setModuleMoveCallback(ModuleMoveCallback cb) { moduleMoveCallback = std::move(cb); }
     void setModuleSelectedCallback(ModuleSelectedCallback cb) { moduleSelectedCallback = std::move(cb); }
@@ -283,6 +288,10 @@ private:
         juce::String componentId;
         juce::Rectangle<float> control;        // canvas coordinates
         juce::Rectangle<int>   moduleBounds;
+        /** The control draws its own arrows (a mode="increment" button), so the
+            floating pair would sit on top of a pair that is already there. It
+            still names the target `+` and `-` step. */
+        bool ownArrows = false;
     };
     ValueSpinner spinner { *this };
     SpinnerTarget spinnerTarget;
@@ -442,6 +451,7 @@ private:
     CustomParameterChangeCallback customParameterChangeCallback;
     ModuleDropCallback moduleDropCallback;
     DeleteModuleCallback deleteModuleCallback;
+    ReplaceModuleCallback replaceModuleCallback;
     RenameModuleCallback renameModuleCallback;
     ModuleMoveCallback moduleMoveCallback;
     ModuleSelectedCallback moduleSelectedCallback;
@@ -687,6 +697,9 @@ private:
 
     // Zoom
     float zoomLevel = 1.0f;
+    bool zoomedToSelection = false;       // Z zoomed in, and the next Z goes back
+    float zoomBeforeSelection = 1.0f;
+    juce::Point<int> viewBeforeSelection;
     ColorScheme activeScheme_ = kDarkTheme;
     ThemeId activeThemeId_ = ThemeId::Dark;
     inline static OverlayMode overlayMode = OverlayMode::Off;
@@ -858,6 +871,9 @@ public:
 
     void setDeleteModuleCallback(PatchCanvas::DeleteModuleCallback cb)
     { toBothCanvases(&PatchCanvas::setDeleteModuleCallback, std::move(cb)); }
+
+    void setReplaceModuleCallback(PatchCanvas::ReplaceModuleCallback cb)
+    { toBothCanvases(&PatchCanvas::setReplaceModuleCallback, std::move(cb)); }
 
     void setRenameModuleCallback(PatchCanvas::RenameModuleCallback cb)
     { toBothCanvases(&PatchCanvas::setRenameModuleCallback, std::move(cb)); }
@@ -1040,6 +1056,11 @@ public:
     {
         polyCanvas.zoomToSelection();
         commonCanvas.zoomToSelection();
+    }
+    void toggleZoomToSelection()
+    {
+        polyCanvas.toggleZoomToSelection();
+        commonCanvas.toggleZoomToSelection();
     }
     void resetZoom()
     {

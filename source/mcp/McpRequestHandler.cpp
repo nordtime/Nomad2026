@@ -5,7 +5,12 @@
 #include "../model/SignalType.h"
 #include "../model/Mutator.h"
 #include "../undo/PatchActions.h"
+#include "../model/LightMeterLayout.h"
+#include "../protocol/KnobAssignmentMessage.h"
+#include "McpRules.h"
+#include "../sync/BankTransferManager.h"
 #include <algorithm>
+#include <limits>
 #include <optional>
 #include <utility>
 
@@ -227,14 +232,192 @@ juce::var moduleTypeToVar(const ModuleDescriptor& d, bool includeConnectors)
     return juce::var(obj);
 }
 
+
+// Parameters we have renamed since the bridge became something other people
+// script against. A caller can always address a parameter by parameterId, but a
+// script that wrote the old name should not break because the editor found a
+// better word for it (issue #78).
+bool parameterNameMatches(const juce::String& current, const juce::String& wanted)
+{
+    if (current.equalsIgnoreCase(wanted))
+        return true;
+
+    struct RetiredName { const char* was; const char* now; };
+    static const RetiredName retired[] = {
+        { "in sense", "in level" },   // the two mixers' input attenuators
+    };
+
+    for (const auto& r : retired)
+    {
+        const juce::String was(r.was);
+        if (!wanted.startsWithIgnoreCase(was))
+            continue;
+        // Both names carry the same trailing index ("in sense 3"), so keep it.
+        if (current.equalsIgnoreCase(juce::String(r.now) + wanted.substring(was.length())))
+            return true;
+    }
+    return false;
+}
+
+// The parameter a request names, by parameterId, parameterName or both (which
+// must then agree). A name only matches an editable "parameter"-class entry,
+// never a morph twin, and retired names still work (parameterNameMatches).
+Parameter* resolveParameter(Module& module, const juce::var& params)
+{
+    const bool hasName = params.hasProperty("parameterName");
+    const bool hasId = params.hasProperty("parameterId");
+    if (!hasName && !hasId)
+        throw McpError{ "missing_param", "parameterName or parameterId is required" };
+
+    Parameter* parameter = nullptr;
+    if (hasId)
+        parameter = module.getParameter(static_cast<int>(params["parameterId"]));
+    if (hasName)
+    {
+        const auto wantedName = params["parameterName"].toString().trim();
+        Parameter* namedParameter = nullptr;
+        for (auto& candidate : module.getParameters())
+        {
+            auto* descriptor = candidate.getDescriptor();
+            if (descriptor->paramClass == "parameter"
+                && parameterNameMatches(descriptor->name, wantedName))
+            {
+                namedParameter = &candidate;
+                break;
+            }
+        }
+        if (!namedParameter)
+            throw McpError{ "unknown_parameter", "No editable parameter named '" + wantedName
+                + "' on module " + module.getTitle() };
+        if (parameter && parameter != namedParameter)
+            throw McpError{ "parameter_mismatch", "parameterName and parameterId identify different parameters" };
+        parameter = namedParameter;
+    }
+    if (!parameter)
+        throw McpError{ "unknown_parameter", "No editable synth parameter matches the supplied identifier" };
+    return parameter;
+}
+
+// What a knob, morph or MIDI CC assignment points at, in the same terms the
+// other tools use, plus a label a person can read. Section 2 module 1 is not a
+// module: it is the patch's four morph groups, which knobs and CCs can drive.
+juce::var assignmentTargetToVar(Patch& patch, int section, int moduleIndex, int paramId)
+{
+    auto* obj = new juce::DynamicObject();
+    if (section == McpRules::kMorphSection && moduleIndex == McpRules::kMorphModule)
+    {
+        obj->setProperty("morphGroup", paramId);
+        obj->setProperty("label", "Morph group " + juce::String(paramId));
+        return juce::var(obj);
+    }
+
+    obj->setProperty("section", section);
+    obj->setProperty("containerIndex", moduleIndex);
+    obj->setProperty("parameterId", paramId);
+    juce::String label = "section " + juce::String(section) + " module " + juce::String(moduleIndex)
+                       + " parameter " + juce::String(paramId);
+    if (section == 0 || section == 1)
+    {
+        if (auto* module = patch.getContainer(section).getModuleByIndex(moduleIndex))
+        {
+            juce::String parameterName;
+            if (auto* parameter = module->getParameter(paramId))
+                parameterName = parameter->getDescriptor()->name;
+            obj->setProperty("moduleName", module->getTitle());
+            obj->setProperty("parameterName", parameterName);
+            label = module->getTitle() + ": " + parameterName;
+        }
+    }
+    obj->setProperty("label", label);
+    return juce::var(obj);
+}
+
+struct AssignTarget
+{
+    int section = 0;
+    int module = 0;
+    int param = 0;
+};
+
+// Either a module parameter (section + containerIndex + parameterName/Id) or,
+// where the synth allows it, a morph group's dial (morphGroup 0-3).
+AssignTarget resolveAssignTarget(Patch& patch, const juce::var& params, bool allowMorphGroup)
+{
+    if (params.hasProperty("morphGroup"))
+    {
+        if (!allowMorphGroup)
+            throw McpError{ "invalid_param", "morphGroup is not a valid target for this tool" };
+        if (params.hasProperty("containerIndex"))
+            throw McpError{ "invalid_param", "Give either morphGroup or section/containerIndex/parameter, not both" };
+        const int group = static_cast<int>(params["morphGroup"]);
+        if (!McpRules::isValidMorphGroup(group))
+            throw McpError{ "invalid_param", "morphGroup must be 0-3" };
+        return { McpRules::kMorphSection, McpRules::kMorphModule, group };
+    }
+
+    const int section = resolveSection(params);
+    if (!params.hasProperty("containerIndex"))
+        throw McpError{ "missing_param", "containerIndex is required" };
+    const int containerIndex = static_cast<int>(params["containerIndex"]);
+    auto* module = patch.getContainer(section).getModuleByIndex(containerIndex);
+    if (!module)
+        throw McpError{ "unknown_module", "No module with containerIndex " + juce::String(containerIndex) };
+
+    auto* parameter = resolveParameter(*module, params);
+    const auto* descriptor = parameter->getDescriptor();
+    if (descriptor->paramClass != "parameter")
+        throw McpError{ "not_assignable", "'" + descriptor->name + "' is a " + descriptor->paramClass
+            + " entry, not a synth parameter; only synth parameters can be assigned" };
+    return { section, containerIndex, descriptor->index };
+}
+
+// A knob as an index 0-22 or as the name list_assignments prints ("Knob 7").
+int resolveKnob(const juce::var& params)
+{
+    if (!params.hasProperty("knob"))
+        throw McpError{ "missing_param", "knob is required: an index 0-22 or a name such as \"Knob 7\"" };
+
+    const auto& value = params["knob"];
+    int knob = -1;
+    if (value.isString())
+    {
+        const auto found = McpRules::knobFromName(value.toString());
+        if (!found)
+            throw McpError{ "invalid_knob", "Unknown knob name '" + value.toString()
+                + "': use \"Knob 1\" to \"Knob 18\", \"Pedal\", \"After touch\" or \"On/Off switch\"" };
+        knob = *found;
+    }
+    else
+    {
+        knob = static_cast<int>(value);
+    }
+
+    if (!KnobAssignmentMessage::isValidKnob(knob))
+        throw McpError{ "invalid_knob", "knob index must be 0-17 (Knob 1-18), 19 (Pedal), 20 (After touch) or 22 (On/Off switch)" };
+    return knob;
+}
+
+juce::String knobName(int knob)
+{
+    return juce::String(KnobAssignmentMessage::getKnobName(knob));
+}
 } // namespace
 
+// "slot" is 0-3 (A-D) on a port: "port" (1-based, as MIDI Setup numbers them) picks the
+// synth and defaults to the one being edited. The result is the editor's global slot,
+// port * 4 + slot, which is also what the replies report.
 int McpRequestHandler::resolveSlot(const juce::var& params) const
 {
-    int slot = params.hasProperty("slot") ? static_cast<int>(params["slot"]) : owner_.getActiveSlot();
-    if (slot < 0 || slot >= kNumSlots)
+    const int port = params.hasProperty("port") ? static_cast<int>(params["port"]) - 1
+                                                 : owner_.getActiveSynth();
+    if (port < 0 || port >= kMaxSynths)
+        throw McpError{ "invalid_port", "port must be 1-" + juce::String(kMaxSynths) };
+    if (! params.hasProperty("slot"))
+        return port == owner_.getActiveSynth() ? owner_.getActiveSlot() : SynthSlot::global(port, 0);
+    const int local = static_cast<int>(params["slot"]);
+    if (local < 0 || local >= kNumSlots)
         throw McpError{ "invalid_slot", "slot must be 0-3 (A-D)" };
-    return slot;
+    return SynthSlot::global(port, local);
 }
 
 juce::var McpRequestHandler::handle(const juce::var& request)
@@ -267,6 +450,28 @@ juce::var McpRequestHandler::handle(const juce::var& request)
         else if (method == "open_patch")       result = openPatch(params);
         else if (method == "save_patch")       result = savePatch(params);
         else if (method == "store_to_bank")    result = storeToBank(params);
+        else if (method == "get_synth_status") result = getSynthStatus(params);
+        else if (method == "get_events")       result = getEvents(params);
+        else if (method == "read_lights")      result = readLights(params);
+        else if (method == "list_assignments") result = listAssignments(params);
+        else if (method == "assign_knob")      result = assignKnob(params);
+        else if (method == "unassign_knob")    result = unassignKnob(params);
+        else if (method == "assign_morph")     result = assignMorph(params);
+        else if (method == "unassign_morph")   result = unassignMorph(params);
+        else if (method == "assign_midi_cc")   result = assignMidiCc(params);
+        else if (method == "unassign_midi_cc") result = unassignMidiCc(params);
+        else if (method == "set_morph_value")  result = setMorphValue(params);
+        else if (method == "play_note")        result = playNote(params);
+        else if (method == "list_bank")        result = listBank(params);
+        else if (method == "save_bank")        result = saveBank(params);
+        else if (method == "send_bank")        result = sendBank(params);
+        else if (method == "get_bank_transfer")    result = getBankTransfer(params);
+        else if (method == "cancel_bank_transfer") result = cancelBankTransfer(params);
+        else if (method == "replace_module")   result = replaceModule(params);
+        else if (method == "list_midi_ports")  result = listMidiPorts(params);
+        else if (method == "connect_midi")     result = connectMidi(params);
+        else if (method == "disconnect_midi")  result = disconnectMidi(params);
+        else if (method == "fetch_patch")      result = fetchPatch(params);
         else throw McpError{ "unknown_method", "Unknown method: " + method };
 
         obj->setProperty("ok", true);
@@ -593,14 +798,15 @@ juce::var McpRequestHandler::listPatches(const juce::var& params)
     const auto& root = owner_.getPresetLibraryRoot();
 
     juce::Array<juce::var> loadedSlots;
-    for (int slot = 0; slot < kNumSlots; ++slot)
+    for (int slot = 0; slot < kTotalSlots; ++slot)
     {
         auto* patch = owner_.getSlotPatch(slot);
         if (!patch)
             continue;
         auto* obj = new juce::DynamicObject();
         obj->setProperty("slot", slot);
-        obj->setProperty("slotName", juce::String::charToString(static_cast<char>('A' + slot)));
+        obj->setProperty("port", SynthSlot::synthOf(slot) + 1);
+        obj->setProperty("slotName", juce::String::charToString(static_cast<char>('A' + SynthSlot::localOf(slot))));
         obj->setProperty("patchName", patch->getName());
         const auto& file = owner_.getSlotPatchFile(slot);
         if (file != juce::File())
@@ -787,7 +993,7 @@ juce::var McpRequestHandler::renameModule(const juce::var& params)
     juce::String newName = params["name"].toString().trim();
     if (newName.isEmpty())
         throw McpError{ "invalid_name", "name must not be empty" };
-    if (newName.length() > 16)
+    if (newName.length() > Module::kMaxTitleLength)
         throw McpError{ "invalid_name", "name must be 16 characters or fewer (G1 module-name limit)" };
 
     auto& container = patch->getContainer(section);
@@ -835,6 +1041,75 @@ juce::var McpRequestHandler::deleteModule(const juce::var& params)
     auto* result = new juce::DynamicObject();
     result->setProperty("containerIndex", containerIndex);
     result->setProperty("name", name);
+    return juce::var(result);
+}
+
+juce::var McpRequestHandler::replaceModule(const juce::var& params)
+{
+    int slot = resolveSlot(params);
+    auto* ctx = owner_.getSlotUndoContext(slot);
+    auto* patch = owner_.getSlotPatch(slot);
+    if (!ctx || !patch)
+        throw McpError{ "no_patch", "No patch loaded in slot " + juce::String(slot) };
+    ensurePatchEditable(owner_);
+
+    int section = resolveSection(params);
+    if (!params.hasProperty("containerIndex"))
+        throw McpError{ "missing_param", "containerIndex is required" };
+    int containerIndex = static_cast<int>(params["containerIndex"]);
+    auto* module = patch->getContainer(section).getModuleByIndex(containerIndex);
+    if (!module)
+        throw McpError{ "unknown_module", "No module with containerIndex " + juce::String(containerIndex) };
+
+    const ModuleDescriptor* descriptor = nullptr;
+    if (params.hasProperty("typeId"))
+        descriptor = owner_.getModuleDescriptions().getModuleByIndex(static_cast<int>(params["typeId"]));
+    else if (params.hasProperty("typeName"))
+        descriptor = owner_.getModuleDescriptions().getModuleByName(params["typeName"].toString());
+    else
+        throw McpError{ "missing_param", "typeId or typeName is required" };
+    if (!descriptor)
+        throw McpError{ "unknown_type", "No module type matches the given typeId/typeName" };
+
+    const auto* current = module->getDescriptor();
+    if (descriptor->index == current->index)
+        throw McpError{ "invalid_param", "The module is already a " + current->name };
+    if (!descriptor->instantiable)
+        throw McpError{ "not_instantiable", descriptor->name + " cannot be instantiated" };
+    if (descriptor->category != current->category)
+    {
+        juce::StringArray family;
+        for (auto* d : ModuleReplacement::candidates(owner_.getModuleDescriptions(), *current))
+            family.add(d->name);
+        throw McpError{ "not_same_family", descriptor->name + " is in " + descriptor->category + ", not "
+            + current->category + ": a module can only be replaced by one of its family ("
+            + family.joinIntoString(", ") + ")" };
+    }
+
+    const juce::String previousType = current->name;
+    owner_.prepareSlotModuleDeletion(slot);
+    auto* action = new ReplaceModuleAction(*ctx, section, module, descriptor->index);
+    const int droppedCables = action->getDroppedCables();
+    const int keptCables = action->getKeptCables();
+    const int droppedAssignments = action->getDroppedAssignments();
+    const int keptParameters = action->getKeptParameters();
+
+    owner_.getSlotUndoManager(slot).beginNewTransaction("Replace Module (MCP)");
+    if (!owner_.getSlotUndoManager(slot).perform(action))
+        throw McpError{ "replace_failed", "Could not replace the module: no room below it in its column "
+            "for the taller one, or the module limit is reached" };
+
+    auto* replaced = patch->getContainer(section).getModuleByIndex(containerIndex);
+    auto* result = new juce::DynamicObject();
+    result->setProperty("containerIndex", containerIndex);
+    result->setProperty("previousType", previousType);
+    result->setProperty("type", descriptor->name);
+    result->setProperty("name", replaced != nullptr ? replaced->getTitle() : juce::String());
+    result->setProperty("height", descriptor->height);
+    result->setProperty("keptCables", keptCables);
+    result->setProperty("droppedCables", droppedCables);
+    result->setProperty("keptParameters", keptParameters);
+    result->setProperty("droppedAssignments", droppedAssignments);
     return juce::var(result);
 }
 
@@ -963,32 +1238,7 @@ juce::var McpRequestHandler::setParameter(const juce::var& params)
     if (!module)
         throw McpError{ "unknown_module", "No module with containerIndex " + juce::String(containerIndex) };
 
-    Parameter* parameter = nullptr;
-    if (hasId)
-        parameter = module->getParameter(static_cast<int>(params["parameterId"]));
-    if (hasName)
-    {
-        const auto wantedName = params["parameterName"].toString().trim();
-        Parameter* namedParameter = nullptr;
-        for (auto& candidate : module->getParameters())
-        {
-            auto* descriptor = candidate.getDescriptor();
-            if (descriptor->paramClass == "parameter"
-                && descriptor->name.equalsIgnoreCase(wantedName))
-            {
-                namedParameter = &candidate;
-                break;
-            }
-        }
-        if (!namedParameter)
-            throw McpError{ "unknown_parameter", "No editable parameter named '" + wantedName
-                + "' on module " + module->getTitle() };
-        if (parameter && parameter != namedParameter)
-            throw McpError{ "parameter_mismatch", "parameterName and parameterId identify different parameters" };
-        parameter = namedParameter;
-    }
-    if (!parameter)
-        throw McpError{ "unknown_parameter", "No editable synth parameter matches the supplied identifier" };
+    Parameter* parameter = resolveParameter(*module, params);
 
     auto* descriptor = parameter->getDescriptor();
     const int oldValue = parameter->getValue();
@@ -1179,5 +1429,870 @@ juce::var McpRequestHandler::openPatch(const juce::var& params)
     result->setProperty("slot", slot);
     result->setProperty("patchName", owner_.getSlotPatch(slot)->getName());
     result->setProperty("path", selectedFile.getFullPathName());
+    return juce::var(result);
+}
+
+// ---------------------------------------------------------------------------
+// Reading the synth back. None of these send anything: they report what the
+// editor has already been told, so a client can check an edit landed.
+// ---------------------------------------------------------------------------
+
+juce::var McpRequestHandler::getSynthStatus(const juce::var& /*params*/)
+{
+    const auto& connection = owner_.getConnectionManager();
+    const auto& status = connection.getStatus();
+    const bool connected = connection.isConnected();
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty("connection",
+        connected ? "connected"
+                  : status.state == ConnectionManager::State::Connecting ? "connecting" : "disconnected");
+    result->setProperty("message", status.message);
+    if (connected)
+    {
+        result->setProperty("synthOsVersion", juce::String(status.synthVersionHigh) + "."
+            + juce::String(status.synthVersionLow).paddedLeft('0', 2));
+        result->setProperty("synthModel", juce::String(IAmMessage::modelName(status.synthModel)).toLowerCase());
+    }
+    // null until the synth on this connection has sent its settings, so a client that
+    // just switched synths never reads the previous one's name.
+    result->setProperty("synthName", owner_.areSynthSettingsFromThisConnection()
+                                         ? juce::var(juce::String(owner_.getCachedSynthSettings().name))
+                                         : juce::var());
+    result->setProperty("editorActiveSlot", owner_.getActiveSlot());
+    result->setProperty("synthFocusedSlot", connected ? connection.getCurrentSlot() : -1);
+    result->setProperty("patchListLoaded", connection.isPatchListLoaded());
+
+    auto* transfer = new juce::DynamicObject();
+    transfer->setProperty("fetching", connection.isFetchingPatch());
+    transfer->setProperty("uploading", connection.isUploadingPatch());
+    transfer->setProperty("editQueueIdle", connection.isAckedQueueIdle());
+    result->setProperty("transfer", juce::var(transfer));
+
+    const bool maskKnown = owner_.isSlotEnableStateKnown();
+    // Everything above and below is about the synth being edited (its port); the
+    // slots listed are its four, numbered globally like every other "slot".
+    result->setProperty("port", owner_.getActiveSynth() + 1);
+    result->setProperty("slotsPerPort", kNumSlots);
+    juce::Array<juce::var> slots;
+    for (int local = 0; local < kNumSlots; ++local)
+    {
+        const int slot = SynthSlot::global(owner_.getActiveSynth(), local);
+        auto* s = new juce::DynamicObject();
+        s->setProperty("slot", slot);
+        s->setProperty("slotName", juce::String::charToString(static_cast<char>('A' + local)));
+        auto* patch = owner_.getSlotPatch(slot);
+        s->setProperty("patchName", patch != nullptr ? juce::var(patch->getName()) : juce::var());
+        // LOCAL: the editor's patch is not known to match the synth's. Edits to
+        // a LOCAL slot are still sent while connected (plan item S4).
+        s->setProperty("local", owner_.isSlotLocal(slot));
+        s->setProperty("enabled", maskKnown ? juce::var(owner_.getLastEnabledSlots()[static_cast<size_t>(local)])
+                                            : juce::var());
+        s->setProperty("voices", owner_.getSynthVoiceCounts()[static_cast<size_t>(local)]);
+        const int bankSection = connection.getSlotBankSection(local);
+        const int bankPosition = connection.getSlotBankPosition(local);
+        if (bankSection >= 0 && bankPosition >= 0)
+            s->setProperty("bankLocation", (bankSection + 1) * 100 + bankPosition + 1);
+        slots.add(juce::var(s));
+    }
+    result->setProperty("slots", slots);
+
+    const auto& frame = owner_.getLastLightMeterFrame();
+    result->setProperty("lightsSlot", frame.slot);
+    result->setProperty("lightsLastChangeAgeMs", frame.timeMs > 0
+        ? juce::var(static_cast<juce::int64>(juce::Time::currentTimeMillis() - frame.timeMs))
+        : juce::var());
+    result->setProperty("latestEventSeq", static_cast<juce::int64>(owner_.getMcpEventLog().latestSeq()));
+    return juce::var(result);
+}
+
+juce::var McpRequestHandler::getEvents(const juce::var& params)
+{
+    const juce::int64 after = params.hasProperty("after") ? static_cast<juce::int64>(params["after"]) : 0;
+    const int limit = juce::jlimit(1, 500, params.hasProperty("limit") ? static_cast<int>(params["limit"]) : 100);
+
+    juce::StringArray types;
+    if (auto* wanted = params["types"].getArray())
+        for (const auto& type : *wanted)
+            types.add(type.toString());
+    else if (params["types"].isString())
+        types.add(params["types"].toString());
+
+    const auto page = owner_.getMcpEventLog().since(after, std::numeric_limits<size_t>::max());
+
+    juce::Array<juce::var> events;
+    juce::int64 resumeFrom = static_cast<juce::int64>(page.latestSeq);
+    juce::int64 lastIncluded = after;
+    bool hasMore = false;
+    for (const auto& event : page.events)
+    {
+        if (!types.isEmpty() && !types.contains(event.type))
+            continue;
+        if (events.size() >= limit)
+        {
+            hasMore = true;
+            resumeFrom = lastIncluded;
+            break;
+        }
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("seq", static_cast<juce::int64>(event.seq));
+        obj->setProperty("timeMs", static_cast<juce::int64>(event.timeMs));
+        obj->setProperty("type", event.type);
+        obj->setProperty("slot", event.slot);
+        if (!event.data.isVoid())
+            obj->setProperty("data", event.data);
+        events.add(juce::var(obj));
+        lastIncluded = static_cast<juce::int64>(event.seq);
+    }
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty("events", events);
+    result->setProperty("latestSeq", resumeFrom);
+    result->setProperty("truncated", page.truncated);
+    result->setProperty("hasMore", hasMore);
+    return juce::var(result);
+}
+
+juce::var McpRequestHandler::readLights(const juce::var& params)
+{
+    const auto& connection = owner_.getConnectionManager();
+    if (!connection.isConnected())
+        throw McpError{ "not_connected", "No synth connected: LEDs and meters are streamed by the synth" };
+
+    // The G1 streams lights for the one slot it has focused, which the editor
+    // keeps equal to its active slot.
+    const int slot = owner_.getActiveSlot();
+    if (params.hasProperty("slot") && static_cast<int>(params["slot"]) != slot)
+        throw McpError{ "lights_unavailable", "The synth only streams LEDs and meters for its focused slot ("
+            + juce::String(slot) + "); focus the other slot first" };
+    Patch* patch = owner_.getSlotPatch(slot);
+    if (!patch)
+        throw McpError{ "no_patch", "No patch loaded in slot " + juce::String(slot) };
+
+    const bool hasSectionFilter = params.hasProperty("section");
+    const int sectionFilter = hasSectionFilter ? resolveSection(params) : -1;
+    std::vector<int> onlyIndices;
+    if (params.hasProperty("containerIndex"))
+    {
+        const auto& v = params["containerIndex"];
+        if (auto* arr = v.getArray())
+            for (auto& e : *arr) onlyIndices.push_back(static_cast<int>(e));
+        else
+            onlyIndices.push_back(static_cast<int>(v));
+    }
+
+    const auto& frame = owner_.getLastLightMeterFrame();
+    const auto table = LightMeterLayout::build(patch, &owner_.getThemeData());
+
+    juce::Array<juce::var> modules;
+    for (const auto& range : table.ranges)
+    {
+        if (range.lightCount == 0 && range.meterCount == 0)
+            continue;
+        if (hasSectionFilter && range.section != sectionFilter)
+            continue;
+        if (!onlyIndices.empty()
+            && std::find(onlyIndices.begin(), onlyIndices.end(), range.containerIndex) == onlyIndices.end())
+            continue;
+
+        auto* module = patch->getContainer(range.section).getModuleByIndex(range.containerIndex);
+        if (module == nullptr)
+            continue;
+
+        juce::Array<juce::var> leds;
+        for (int i = 0; i < range.lightCount && range.lightBase + i < 128; ++i)
+            leds.add(frame.lights[static_cast<size_t>(range.lightBase + i)]);
+        juce::Array<juce::var> meters;
+        for (int i = 0; i < range.meterCount && range.meterBase + i < 128; ++i)
+            meters.add(frame.meters[static_cast<size_t>(range.meterBase + i)]);
+
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty("section", range.section);
+        obj->setProperty("containerIndex", range.containerIndex);
+        obj->setProperty("name", module->getTitle());
+        obj->setProperty("type", module->getDescriptor()->name);
+        obj->setProperty("leds", leds);
+        obj->setProperty("meters", meters);
+        modules.add(juce::var(obj));
+    }
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty("slot", slot);
+    result->setProperty("modules", modules);
+    result->setProperty("lastChangeAgeMs", frame.timeMs > 0
+        ? juce::var(static_cast<juce::int64>(juce::Time::currentTimeMillis() - frame.timeMs))
+        : juce::var());
+    // Values recorded while another slot had focus are that slot's, not these.
+    result->setProperty("stale", frame.timeMs == 0 || frame.slot != slot);
+    result->setProperty("hint", "LEDs are 0-3. Meters come in wire-order pairs (channel B, channel A): "
+                                "a stereo meter's left side is the second value, a single meter reads the first.");
+    return juce::var(result);
+}
+
+// ---------------------------------------------------------------------------
+// Knob, morph and MIDI CC assignments (plan item M1). Every change goes through
+// the same undo actions as the canvas, the inspector and the header bar, so it
+// is drawn, sent to a connected synth and undone with Ctrl+Z like theirs.
+// ---------------------------------------------------------------------------
+
+juce::var McpRequestHandler::listAssignments(const juce::var& params)
+{
+    const int slot = resolveSlot(params);
+    Patch* patch = owner_.getSlotPatch(slot);
+    if (!patch)
+        throw McpError{ "no_patch", "No patch loaded in slot " + juce::String(slot) };
+
+    juce::Array<juce::var> knobs;
+    for (int k = 0; k < KnobAssignmentMessage::numKnobs; ++k)
+    {
+        const auto& ka = patch->knobAssignments[static_cast<size_t>(k)];
+        if (!KnobAssignmentMessage::isValidKnob(k) || !ka.assigned)
+            continue;
+        auto entry = assignmentTargetToVar(*patch, ka.section, ka.module, ka.param);
+        entry.getDynamicObject()->setProperty("knob", k);
+        entry.getDynamicObject()->setProperty("knobName", knobName(k));
+        knobs.add(entry);
+    }
+
+    juce::Array<juce::var> groups;
+    for (int g = 0; g < McpRules::kNumMorphGroups; ++g)
+    {
+        juce::Array<juce::var> members;
+        for (const auto& ma : patch->morphAssignments)
+        {
+            if (ma.morph != g)
+                continue;
+            auto entry = assignmentTargetToVar(*patch, ma.section, ma.module, ma.param);
+            entry.getDynamicObject()->setProperty("range", ma.range);
+            members.add(entry);
+        }
+        auto* group = new juce::DynamicObject();
+        group->setProperty("morphGroup", g);
+        group->setProperty("value", patch->morphValues[static_cast<size_t>(g)]);
+        group->setProperty("keyboard", patch->morphKeyboard[static_cast<size_t>(g)]);
+        group->setProperty("assignments", members);
+        groups.add(juce::var(group));
+    }
+
+    juce::Array<juce::var> ccs;
+    for (const auto& ca : patch->ctrlAssignments)
+    {
+        auto entry = assignmentTargetToVar(*patch, ca.section, ca.module, ca.param);
+        entry.getDynamicObject()->setProperty("cc", ca.control);
+        ccs.add(entry);
+    }
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty("slot", slot);
+    result->setProperty("knobs", knobs);
+    result->setProperty("morphGroups", groups);
+    result->setProperty("morphAssignmentCount", static_cast<int>(patch->morphAssignments.size()));
+    result->setProperty("morphAssignmentLimit", McpRules::kMaxMorphAssignments);
+    result->setProperty("midiCcs", ccs);
+    return juce::var(result);
+}
+
+juce::var McpRequestHandler::assignKnob(const juce::var& params)
+{
+    const int slot = resolveSlot(params);
+    Patch* patch = owner_.getSlotPatch(slot);
+    UndoContext* ctx = owner_.getSlotUndoContext(slot);
+    if (!patch || !ctx)
+        throw McpError{ "no_patch", "No patch loaded in slot " + juce::String(slot) };
+    ensurePatchEditable(owner_);
+
+    const auto target = resolveAssignTarget(*patch, params, /*allowMorphGroup=*/true);
+    const int knob = resolveKnob(params);
+    const bool replace = params.hasProperty("replace") && static_cast<bool>(params["replace"]);
+
+    int previousKnob = -1;
+    for (int k = 0; k < KnobAssignmentMessage::numKnobs; ++k)
+    {
+        const auto& ka = patch->knobAssignments[static_cast<size_t>(k)];
+        if (ka.assigned && ka.section == target.section && ka.module == target.module
+            && ka.param == target.param)
+        {
+            previousKnob = k;
+            break;
+        }
+    }
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty("slot", slot);
+    result->setProperty("knob", knob);
+    result->setProperty("knobName", knobName(knob));
+    result->setProperty("target", assignmentTargetToVar(*patch, target.section, target.module, target.param));
+    result->setProperty("previousKnob", previousKnob);
+    if (previousKnob == knob)
+    {
+        result->setProperty("changed", false);
+        return juce::var(result);
+    }
+
+    // A copy: the actions below overwrite this entry.
+    const KnobAssignment occupant = patch->knobAssignments[static_cast<size_t>(knob)];
+    if (occupant.assigned && !replace)
+        throw McpError{ "knob_in_use", knobName(knob) + " already drives "
+            + assignmentTargetToVar(*patch, occupant.section, occupant.module, occupant.param)["label"].toString()
+            + "; pass replace=true to take it over" };
+
+    // Freeing the knob first, as its own action in the same transaction, is what
+    // lets one Ctrl+Z give it back to whatever it drove before.
+    auto& undo = owner_.getSlotUndoManager(slot);
+    undo.beginNewTransaction("Assign Knob (MCP)");
+    if (occupant.assigned)
+    {
+        result->setProperty("replaced",
+            assignmentTargetToVar(*patch, occupant.section, occupant.module, occupant.param));
+        if (!undo.perform(new KnobAssignAction(*ctx, occupant.section, occupant.module,
+                                               occupant.param, -1, knob)))
+            throw McpError{ "assign_failed", "Failed to free the knob (unexpected)" };
+    }
+    if (!undo.perform(new KnobAssignAction(*ctx, target.section, target.module, target.param,
+                                           knob, previousKnob)))
+        throw McpError{ "assign_failed", "Failed to assign the knob (unexpected)" };
+
+    result->setProperty("changed", true);
+    return juce::var(result);
+}
+
+juce::var McpRequestHandler::unassignKnob(const juce::var& params)
+{
+    const int slot = resolveSlot(params);
+    Patch* patch = owner_.getSlotPatch(slot);
+    UndoContext* ctx = owner_.getSlotUndoContext(slot);
+    if (!patch || !ctx)
+        throw McpError{ "no_patch", "No patch loaded in slot " + juce::String(slot) };
+    ensurePatchEditable(owner_);
+
+    const int knob = resolveKnob(params);
+    const KnobAssignment occupant = patch->knobAssignments[static_cast<size_t>(knob)];
+    if (!occupant.assigned)
+        throw McpError{ "knob_not_assigned", knobName(knob) + " is not assigned" };
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty("slot", slot);
+    result->setProperty("knob", knob);
+    result->setProperty("knobName", knobName(knob));
+    result->setProperty("target", assignmentTargetToVar(*patch, occupant.section, occupant.module, occupant.param));
+
+    owner_.getSlotUndoManager(slot).beginNewTransaction("Unassign Knob (MCP)");
+    if (!owner_.getSlotUndoManager(slot).perform(new KnobAssignAction(
+            *ctx, occupant.section, occupant.module, occupant.param, -1, knob)))
+        throw McpError{ "assign_failed", "Failed to unassign the knob (unexpected)" };
+    return juce::var(result);
+}
+
+juce::var McpRequestHandler::assignMorph(const juce::var& params)
+{
+    const int slot = resolveSlot(params);
+    Patch* patch = owner_.getSlotPatch(slot);
+    UndoContext* ctx = owner_.getSlotUndoContext(slot);
+    if (!patch || !ctx)
+        throw McpError{ "no_patch", "No patch loaded in slot " + juce::String(slot) };
+    ensurePatchEditable(owner_);
+
+    const auto target = resolveAssignTarget(*patch, params, /*allowMorphGroup=*/false);
+    if (!params.hasProperty("group"))
+        throw McpError{ "missing_param", "group is required (morph group 0-3)" };
+    const int group = static_cast<int>(params["group"]);
+    if (!McpRules::isValidMorphGroup(group))
+        throw McpError{ "invalid_param", "group must be 0-3" };
+    const int range = params.hasProperty("range") ? static_cast<int>(params["range"]) : 0;
+    if (!McpRules::isValidMorphRange(range))
+        throw McpError{ "invalid_param", "range must be -127 to 127" };
+
+    int oldGroup = -1;
+    int oldRange = 0;
+    for (const auto& ma : patch->morphAssignments)
+        if (ma.section == target.section && ma.module == target.module && ma.param == target.param)
+        {
+            oldGroup = ma.morph;
+            oldRange = ma.range;
+            break;
+        }
+
+    if (oldGroup < 0 && static_cast<int>(patch->morphAssignments.size()) >= McpRules::kMaxMorphAssignments)
+        throw McpError{ "morph_limit_reached", "The patch already has "
+            + juce::String(McpRules::kMaxMorphAssignments)
+            + " morph assignments, the most a G1 patch can hold; unassign one first" };
+
+    // The assignment starts at range 0, as it does from the canvas menu; the
+    // range is its own action so undoing lands on the same two steps.
+    auto& undo = owner_.getSlotUndoManager(slot);
+    undo.beginNewTransaction("Assign Morph (MCP)");
+    if (!undo.perform(new MorphAssignAction(*ctx, target.section, target.module, target.param,
+                                            group, oldGroup, oldRange)))
+        throw McpError{ "assign_failed", "Failed to assign the morph group (unexpected)" };
+    if (range != 0
+        && !undo.perform(new MorphRangeChangeAction(*ctx, target.section, target.module, target.param,
+                                                    0, range)))
+        throw McpError{ "assign_failed", "Failed to set the morph range (unexpected)" };
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty("slot", slot);
+    result->setProperty("target", assignmentTargetToVar(*patch, target.section, target.module, target.param));
+    result->setProperty("group", group);
+    result->setProperty("range", range);
+    result->setProperty("previousGroup", oldGroup);
+    result->setProperty("previousRange", oldRange);
+    return juce::var(result);
+}
+
+juce::var McpRequestHandler::unassignMorph(const juce::var& params)
+{
+    const int slot = resolveSlot(params);
+    Patch* patch = owner_.getSlotPatch(slot);
+    UndoContext* ctx = owner_.getSlotUndoContext(slot);
+    if (!patch || !ctx)
+        throw McpError{ "no_patch", "No patch loaded in slot " + juce::String(slot) };
+    ensurePatchEditable(owner_);
+
+    const auto target = resolveAssignTarget(*patch, params, /*allowMorphGroup=*/false);
+    int oldGroup = -1;
+    int oldRange = 0;
+    for (const auto& ma : patch->morphAssignments)
+        if (ma.section == target.section && ma.module == target.module && ma.param == target.param)
+        {
+            oldGroup = ma.morph;
+            oldRange = ma.range;
+            break;
+        }
+    if (oldGroup < 0)
+        throw McpError{ "morph_not_assigned", "That parameter is not in a morph group" };
+
+    owner_.getSlotUndoManager(slot).beginNewTransaction("Unassign Morph (MCP)");
+    if (!owner_.getSlotUndoManager(slot).perform(new MorphAssignAction(
+            *ctx, target.section, target.module, target.param, -1, oldGroup, oldRange)))
+        throw McpError{ "assign_failed", "Failed to remove the morph assignment (unexpected)" };
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty("slot", slot);
+    result->setProperty("target", assignmentTargetToVar(*patch, target.section, target.module, target.param));
+    result->setProperty("previousGroup", oldGroup);
+    result->setProperty("previousRange", oldRange);
+    return juce::var(result);
+}
+
+juce::var McpRequestHandler::assignMidiCc(const juce::var& params)
+{
+    const int slot = resolveSlot(params);
+    Patch* patch = owner_.getSlotPatch(slot);
+    UndoContext* ctx = owner_.getSlotUndoContext(slot);
+    if (!patch || !ctx)
+        throw McpError{ "no_patch", "No patch loaded in slot " + juce::String(slot) };
+    ensurePatchEditable(owner_);
+
+    const auto target = resolveAssignTarget(*patch, params, /*allowMorphGroup=*/true);
+    if (!params.hasProperty("cc"))
+        throw McpError{ "missing_param", "cc is required (0-119)" };
+    const int cc = static_cast<int>(params["cc"]);
+    if (!McpRules::isValidMidiCc(cc))
+        throw McpError{ "invalid_param", "cc must be 0-119; 120-127 are MIDI channel mode messages" };
+    const bool replace = params.hasProperty("replace") && static_cast<bool>(params["replace"]);
+
+    int previousCc = -1;
+    std::optional<CtrlAssignment> occupant;
+    for (const auto& ca : patch->ctrlAssignments)
+    {
+        const bool sameTarget = ca.section == target.section && ca.module == target.module
+                             && ca.param == target.param;
+        if (sameTarget)
+            previousCc = ca.control;
+        else if (ca.control == cc && !occupant)
+            occupant = ca;
+    }
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty("slot", slot);
+    result->setProperty("cc", cc);
+    result->setProperty("target", assignmentTargetToVar(*patch, target.section, target.module, target.param));
+    result->setProperty("previousCc", previousCc);
+    if (previousCc == cc)
+    {
+        result->setProperty("changed", false);
+        return juce::var(result);
+    }
+
+    if (occupant && !replace)
+        throw McpError{ "cc_in_use", "CC " + juce::String(cc) + " already drives "
+            + assignmentTargetToVar(*patch, occupant->section, occupant->module, occupant->param)["label"].toString()
+            + "; pass replace=true to take it over" };
+
+    auto& undo = owner_.getSlotUndoManager(slot);
+    undo.beginNewTransaction("Assign MIDI CC (MCP)");
+    if (occupant)
+    {
+        result->setProperty("replaced",
+            assignmentTargetToVar(*patch, occupant->section, occupant->module, occupant->param));
+        if (!undo.perform(new MidiCtrlAssignAction(*ctx, occupant->section, occupant->module,
+                                                   occupant->param, -1, cc)))
+            throw McpError{ "assign_failed", "Failed to free the CC (unexpected)" };
+    }
+    if (!undo.perform(new MidiCtrlAssignAction(*ctx, target.section, target.module, target.param,
+                                               cc, previousCc)))
+        throw McpError{ "assign_failed", "Failed to assign the CC (unexpected)" };
+
+    result->setProperty("changed", true);
+    return juce::var(result);
+}
+
+juce::var McpRequestHandler::unassignMidiCc(const juce::var& params)
+{
+    const int slot = resolveSlot(params);
+    Patch* patch = owner_.getSlotPatch(slot);
+    UndoContext* ctx = owner_.getSlotUndoContext(slot);
+    if (!patch || !ctx)
+        throw McpError{ "no_patch", "No patch loaded in slot " + juce::String(slot) };
+    ensurePatchEditable(owner_);
+
+    if (!params.hasProperty("cc"))
+        throw McpError{ "missing_param", "cc is required (0-119)" };
+    const int cc = static_cast<int>(params["cc"]);
+
+    std::optional<CtrlAssignment> assigned;
+    for (const auto& ca : patch->ctrlAssignments)
+        if (ca.control == cc)
+        {
+            assigned = ca;
+            break;
+        }
+    if (!assigned)
+        throw McpError{ "cc_not_assigned", "CC " + juce::String(cc) + " is not assigned" };
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty("slot", slot);
+    result->setProperty("cc", cc);
+    result->setProperty("target", assignmentTargetToVar(*patch, assigned->section, assigned->module, assigned->param));
+
+    owner_.getSlotUndoManager(slot).beginNewTransaction("Unassign MIDI CC (MCP)");
+    if (!owner_.getSlotUndoManager(slot).perform(new MidiCtrlAssignAction(
+            *ctx, assigned->section, assigned->module, assigned->param, -1, cc)))
+        throw McpError{ "assign_failed", "Failed to unassign the CC (unexpected)" };
+    return juce::var(result);
+}
+
+// ---------------------------------------------------------------------------
+// Playing the synth: a morph dial and a note, for checking an edit by ear or
+// by its meters.
+// ---------------------------------------------------------------------------
+
+juce::var McpRequestHandler::setMorphValue(const juce::var& params)
+{
+    const int slot = resolveSlot(params);
+    Patch* patch = owner_.getSlotPatch(slot);
+    if (!patch)
+        throw McpError{ "no_patch", "No patch loaded in slot " + juce::String(slot) };
+    ensurePatchEditable(owner_);
+
+    if (!params.hasProperty("morphGroup"))
+        throw McpError{ "missing_param", "morphGroup is required (0-3)" };
+    const int group = static_cast<int>(params["morphGroup"]);
+    if (!McpRules::isValidMorphGroup(group))
+        throw McpError{ "invalid_param", "morphGroup must be 0-3" };
+    const bool hasValue = params.hasProperty("value");
+    const bool hasDelta = params.hasProperty("delta");
+    if (hasValue == hasDelta)
+        throw McpError{ "invalid_param", "Provide exactly one of value or delta" };
+
+    const int oldValue = patch->morphValues[static_cast<size_t>(group)];
+    const int requested = hasValue ? static_cast<int>(params["value"])
+                                   : oldValue + static_cast<int>(params["delta"]);
+    juce::String error;
+    if (!owner_.setSlotMorphValue(slot, group, juce::jlimit(0, 127, requested), error))
+        throw McpError{ "morph_value_failed", error };
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty("slot", slot);
+    result->setProperty("morphGroup", group);
+    result->setProperty("oldValue", oldValue);
+    result->setProperty("value", patch->morphValues[static_cast<size_t>(group)]);
+    return juce::var(result);
+}
+
+juce::var McpRequestHandler::playNote(const juce::var& params)
+{
+    const auto& connection = owner_.getConnectionManager();
+    if (!connection.isConnected())
+        throw McpError{ "not_connected", "No synth connected" };
+    if (!params.hasProperty("note"))
+        throw McpError{ "missing_param", "note is required (0-127, 60 = middle C)" };
+
+    const int note = static_cast<int>(params["note"]);
+    const int durationMs = juce::jlimit(10, 10000,
+        params.hasProperty("durationMs") ? static_cast<int>(params["durationMs"]) : 500);
+    juce::String error;
+    if (!owner_.playNoteOnSynth(note, durationMs, error))
+        throw McpError{ "invalid_param", error };
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty("note", note);
+    result->setProperty("durationMs", durationMs);
+    result->setProperty("synthFocusedSlot", connection.getCurrentSlot());
+    return juce::var(result);
+}
+
+// The MIDI ports the editor could connect to, and which pair it is on now. Lets a
+// client move the editor between a real synth and G1-Emu without the window.
+juce::var McpRequestHandler::listMidiPorts(const juce::var&)
+{
+    auto portList = [](const juce::Array<juce::MidiDeviceInfo>& devices)
+    {
+        juce::Array<juce::var> out;
+        for (const auto& d : devices)
+        {
+            auto* o = new juce::DynamicObject();
+            o->setProperty("id", d.identifier);
+            o->setProperty("name", d.name);
+            out.add(juce::var(o));
+        }
+        return out;
+    };
+    const auto& connection = owner_.getConnectionManager();
+    auto* result = new juce::DynamicObject();
+    result->setProperty("inputs", portList(ConnectionManager::getAvailableInputDevices()));
+    result->setProperty("outputs", portList(ConnectionManager::getAvailableOutputDevices()));
+    result->setProperty("connected", connection.isConnected());
+    result->setProperty("message", connection.getStatus().message);
+    result->setProperty("currentInputId", owner_.getLastInputId());
+    result->setProperty("currentOutputId", owner_.getLastOutputId());
+    return juce::var(result);
+}
+
+namespace
+{
+    // A port by its id, its exact name, or a unique part of its name (McpRules::matchPort).
+    juce::MidiDeviceInfo resolvePort(const juce::Array<juce::MidiDeviceInfo>& devices,
+                                     const juce::String& wanted, const char* what)
+    {
+        juce::StringArray ids, names;
+        for (const auto& d : devices)
+        {
+            ids.add(d.identifier);
+            names.add(d.name);
+        }
+        const auto matches = McpRules::matchPort(ids, names, wanted);
+        if (matches.size() == 1)
+            return devices[matches.getFirst()];
+        juce::StringArray listed;
+        if (matches.isEmpty())
+            listed = names;
+        else
+            for (const int i : matches)
+                listed.add(names[i]);
+        throw McpError{ matches.isEmpty() ? "not_found" : "ambiguous",
+                        juce::String(what) + " \"" + wanted + "\" "
+                            + (matches.isEmpty() ? "matches no port" : "matches several ports")
+                            + "; available: " + listed.joinIntoString(", ") };
+    }
+}
+
+// Connect the editor to an input and an output port (by id, name, or a unique part
+// of the name), the way the MIDI settings dialog does: the old connection is
+// dropped, the handshake runs, and the ports are remembered once the synth answers.
+juce::var McpRequestHandler::connectMidi(const juce::var& params)
+{
+    if (!params.hasProperty("input") || !params.hasProperty("output"))
+        throw McpError{ "missing_param", "input and output are required (a port id, name, or unique part of a name)" };
+    const auto in = resolvePort(ConnectionManager::getAvailableInputDevices(), params["input"].toString(), "input");
+    const auto out = resolvePort(ConnectionManager::getAvailableOutputDevices(), params["output"].toString(), "output");
+    owner_.connectToPorts(in.identifier, out.identifier);
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty("input", in.name);
+    result->setProperty("output", out.name);
+    result->setProperty("note", "The handshake runs in the background: poll get_synth_status until connection is \"connected\" and check synthName");
+    return juce::var(result);
+}
+
+juce::var McpRequestHandler::disconnectMidi(const juce::var&)
+{
+    owner_.disconnectFromSynth();
+    auto* result = new juce::DynamicObject();
+    result->setProperty("connected", false);
+    return juce::var(result);
+}
+
+// Ask the synth for a slot's patch again. The editor's copy of that slot is
+// replaced when the patch arrives, so unsaved editor-only changes are lost; the
+// synth is not changed.
+juce::var McpRequestHandler::fetchPatch(const juce::var& params)
+{
+    const int slot = params.hasProperty("slot") ? static_cast<int>(params["slot"])
+                                                : owner_.getConnectionManager().getCurrentSlot();
+    juce::String error;
+    if (!owner_.refetchSlotFromSynth(slot, error))
+        throw McpError{ owner_.getConnectionManager().isConnected() ? "busy_or_invalid" : "not_connected", error };
+    auto* result = new juce::DynamicObject();
+    result->setProperty("slot", slot);
+    result->setProperty("note", "Fetching: poll get_synth_status until transfer.fetching is false, or get_events for patch_received");
+    return juce::var(result);
+}
+
+// What the synth holds in each position of one bank, from the patch list the
+// editor already fetched on connect. store_to_bank overwrites without asking,
+// so this is how a client finds a free position first.
+juce::var McpRequestHandler::listBank(const juce::var& params)
+{
+    const auto& connection = owner_.getConnectionManager();
+    if (!connection.isConnected())
+        throw McpError{ "not_connected", "No synth connected: the bank list comes from the synth" };
+    if (!connection.isPatchListLoaded())
+        throw McpError{ "patch_list_loading", "The synth's patch list has not finished loading; retry shortly" };
+    if (!params.hasProperty("bank"))
+        throw McpError{ "missing_param", "bank is required (1-9)" };
+    const int bank = static_cast<int>(params["bank"]);
+    if (bank < 1 || bank > 9)
+        throw McpError{ "invalid_param", "bank must be 1-9" };
+    const bool includeEmpty = !params.hasProperty("includeEmpty") || static_cast<bool>(params["includeEmpty"]);
+
+    const auto& names = connection.getPatchList();
+    juce::Array<juce::var> positions;
+    int used = 0;
+    for (int position = 0; position < 99; ++position)
+    {
+        const auto index = static_cast<size_t>((bank - 1) * 99 + position);
+        const auto name = index < names.size() ? juce::String(names[index]).trim() : juce::String();
+        if (name.isNotEmpty())
+            ++used;
+        else if (!includeEmpty)
+            continue;
+
+        auto* entry = new juce::DynamicObject();
+        entry->setProperty("position", position + 1);
+        entry->setProperty("location", bank * 100 + position + 1);
+        entry->setProperty("name", name.isNotEmpty() ? juce::var(name) : juce::var());
+        positions.add(juce::var(entry));
+    }
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty("bank", bank);
+    result->setProperty("used", used);
+    result->setProperty("free", 99 - used);
+    result->setProperty("positions", positions);
+    return juce::var(result);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Whole banks. A transfer takes seconds and the bridge answers within ten, so
+// these start it and get_bank_transfer follows it. It runs on the synth being
+// edited, exactly as the Device menu's dialogs do, and never touches a slot.
+
+namespace
+{
+int requireBank(const juce::var& params)
+{
+    if (!params.hasProperty("bank"))
+        throw McpError{ "missing_param", "bank is required (1-9)" };
+    const int bank = static_cast<int>(params["bank"]);
+    if (bank < 1 || bank > 9)
+        throw McpError{ "invalid_param", "bank must be 1-9" };
+    return bank;
+}
+
+juce::File requireAbsolutePath(const juce::var& params, const char* key)
+{
+    const auto path = params.getProperty(key, juce::var()).toString().trim();
+    if (path.isEmpty() || !juce::File::isAbsolutePath(path))
+        throw McpError{ "missing_param", juce::String(key) + " must be an absolute path" };
+    return juce::File(path);
+}
+
+juce::var progressToVar(const BankTransferManager& transfer)
+{
+    const auto& p = transfer.getProgress();
+    auto* result = new juce::DynamicObject();
+    result->setProperty("busy", transfer.isBusy());
+    result->setProperty("current", p.current);
+    result->setProperty("total", p.total);
+    result->setProperty("item", p.itemName);
+    result->setProperty("finished", p.finished);
+    result->setProperty("cancelled", p.cancelled);
+    juce::Array<juce::var> failures;
+    for (const auto& f : p.failures)
+        failures.add(f);
+    result->setProperty("failures", failures);
+    return juce::var(result);
+}
+
+void requireIdleConnected(MainComponent& owner)
+{
+    if (!owner.getConnectionManager().isConnected())
+        throw McpError{ "not_connected", "No synth connected" };
+    if (owner.getBankTransfer().isBusy())
+        throw McpError{ "busy", "A bank transfer is already running: follow it with get_bank_transfer" };
+}
+}  // namespace
+
+juce::var McpRequestHandler::saveBank(const juce::var& params)
+{
+    requireIdleConnected(owner_);
+    const int bank = requireBank(params);
+    const auto folder = requireAbsolutePath(params, "folder");
+    if (folder.existsAsFile())
+        throw McpError{ "invalid_param", "folder is a file" };
+
+    auto& transfer = owner_.getBankTransfer();
+    transfer.saveBankToDisk(bank - 1, folder, nullptr);
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty("bank", bank);
+    result->setProperty("folder", folder.getFullPathName());
+    result->setProperty("list", folder.getChildFile("Bank" + juce::String(bank) + ".pchList").getFullPathName());
+    result->setProperty("transfer", progressToVar(transfer));
+    return juce::var(result);
+}
+
+juce::var McpRequestHandler::sendBank(const juce::var& params)
+{
+    requireIdleConnected(owner_);
+    const int bank = requireBank(params);
+    const auto source = requireAbsolutePath(params, "source");
+    if (!source.exists())
+        throw McpError{ "not_found", "No such file or folder: " + source.getFullPathName() };
+
+    juce::StringArray problems;
+    juce::File list;
+    const auto items = BankTransferManager::itemsFrom(source, problems, list);
+    if (items.empty())
+        throw McpError{ "nothing_to_send", problems.isEmpty() ? juce::String("No .pch files there")
+                                                              : problems.joinIntoString("; ") };
+
+    auto& transfer = owner_.getBankTransfer();
+    transfer.sendBankToSynth(items, bank - 1, nullptr);
+
+    juce::Array<juce::var> positions;
+    for (const auto& item : items)
+    {
+        auto* entry = new juce::DynamicObject();
+        entry->setProperty("position", item.position + 1);
+        entry->setProperty("file", item.file.getFileName());
+        positions.add(juce::var(entry));
+    }
+    juce::Array<juce::var> leftOut;
+    for (const auto& p : problems)
+        leftOut.add(p);
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty("bank", bank);
+    result->setProperty("list", list != juce::File() ? juce::var(list.getFullPathName()) : juce::var());
+    result->setProperty("positions", positions);
+    result->setProperty("leftOut", leftOut);
+    result->setProperty("transfer", progressToVar(transfer));
+    return juce::var(result);
+}
+
+juce::var McpRequestHandler::getBankTransfer(const juce::var&)
+{
+    return progressToVar(owner_.getBankTransfer());
+}
+
+juce::var McpRequestHandler::cancelBankTransfer(const juce::var&)
+{
+    auto& transfer = owner_.getBankTransfer();
+    const bool wasBusy = transfer.isBusy();
+    transfer.cancel();
+    auto* result = new juce::DynamicObject();
+    result->setProperty("cancelling", wasBusy);
     return juce::var(result);
 }

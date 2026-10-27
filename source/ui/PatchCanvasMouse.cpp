@@ -1,7 +1,10 @@
 #include "PatchCanvasComponent.h"
 #include "QuickAddPopup.h"
 #include "KnobDrag.h"
+#include "PartialArrows.h"
 #include "../model/ModulePlacement.h"
+#include "../model/ModuleReplacement.h"
+#include "../model/KeyQuantScales.h"
 #include "../protocol/KnobAssignmentMessage.h"
 #include <cmath>
 #include <set>
@@ -293,9 +296,12 @@ void PatchCanvas::timerCallback()
 
 // ── Nudge arrows ─────────────────────────────────────────────────────────────
 
-// Same walk as findControlAt, but only over the things worth nudging: a button
+// Same walk as findControlAt, but only over the things worth nudging: a toggle
 // has two states and a text display is driven by the knob beside it, so neither
-// has a step to take.
+// has a step to take. An increment button does: it is a range with the arrows
+// already drawn on it, and leaving it out of this walk is why `+` and `-` did
+// nothing over the Vocoder's bands or NoteSeqB's notes, while NoteSeqA, which
+// has sliders, stepped fine (issues #76, #77).
 bool PatchCanvas::findSpinnerAt(juce::Point<int> canvasPos, SpinnerTarget& out)
 {
     out = SpinnerTarget{};
@@ -317,7 +323,8 @@ bool PatchCanvas::findSpinnerAt(juce::Point<int> canvasPos, SpinnerTarget& out)
 
         const auto rel = canvasPos - bounds.getPosition();
 
-        auto take = [&](const juce::String& componentId, juce::Rectangle<int> r) -> bool
+        auto take = [&](const juce::String& componentId, juce::Rectangle<int> r,
+                        bool ownArrows = false) -> bool
         {
             if (componentId.isEmpty() || !r.contains(rel))
                 return false;
@@ -332,6 +339,7 @@ bool PatchCanvas::findSpinnerAt(juce::Point<int> canvasPos, SpinnerTarget& out)
             out.componentId  = componentId;
             out.moduleBounds = bounds;
             out.control      = r.translated(bounds.getX(), bounds.getY()).toFloat();
+            out.ownArrows    = ownArrows;
             return true;
         };
 
@@ -339,6 +347,9 @@ bool PatchCanvas::findSpinnerAt(juce::Point<int> canvasPos, SpinnerTarget& out)
             if (take(tk.componentId, { tk.x, tk.y, tk.size, tk.size })) return true;
         for (const auto& ts : theme->sliders)
             if (take(ts.componentId, { ts.x, ts.y, ts.width, ts.height })) return true;
+        for (const auto& tb : theme->buttons)
+            if (tb.isIncrement && !tb.isCall
+                && take(tb.componentId, { tb.x, tb.y, tb.width, tb.height }, true)) return true;
 
         return false;   // over the module, but not over anything that steps
     }
@@ -368,7 +379,13 @@ void PatchCanvas::updateSpinner(juce::Point<int> canvasPos)
         : juce::String(next.module.section) + ":"
               + juce::String(next.module.containerIndex) + "/" + next.componentId;
 
-    spinner.showFor(key, next.control, ValueSpinner::Placement::BelowEdge);
+    // A control that carries its own arrows gets no floating pair: it is the
+    // keyboard that needed a target here, not the pointer, which already has
+    // the arrows drawn under it.
+    if (next.ownArrows)
+        spinner.hide();
+    else
+        spinner.showFor(key, next.control, ValueSpinner::Placement::BelowEdge);
     spinner.updateHover(p);
 }
 
@@ -906,10 +923,19 @@ void PatchCanvas::mouseDown(const juce::MouseEvent& e)
                     {
                         if (tb.callMethod == "rnd")
                         {
+                            // A Rnd that names a component randomises what that
+                            // component shows and nothing else. The Vocoder's
+                            // belongs to the routing display, so it shuffles the
+                            // 16 analysis bands and leaves the output gain where
+                            // it was, as the original editor does (issue #77).
+                            // FilterBank's Rnd names no component and still takes
+                            // the whole module.
+                            const bool scopedToBands = tb.callComponent.isNotEmpty();
                             for (auto& p : m.getParameters())
                             {
                                 auto* pd = p.getDescriptor();
                                 if (pd->maxValue - pd->minValue <= 1) continue; // skip binary params (bypass etc)
+                                if (scopedToBands && !pd->name.startsWith("band ")) continue;
                                 int rndVal = juce::Random::getSystemRandom().nextInt(pd->maxValue - pd->minValue + 1) + pd->minValue;
                                 p.setValue(rndVal);
                                 if (parameterChangeCallback)
@@ -1137,13 +1163,17 @@ void PatchCanvas::mouseDown(const juce::MouseEvent& e)
                 if (cd.type == "note-seq-editor")
                 {
                     constexpr int kSteps = 16;
-                    constexpr int kKeyWidth = 16;
-                    int rollX = cd.x + kKeyWidth;
-                    int rollW = juce::jmax(1, cd.width - kKeyWidth);
+                    // The 16 steps fill the display edge to edge, exactly as
+                    // paintCustomDisplays draws them (rollX = display left, rollW
+                    // = display width). A 16px piano-key strip used to sit on the
+                    // left of the roll; the drawing dropped it (issue #76) but
+                    // this hit test kept reserving it, so every step was picked
+                    // up to a full step to the left of where it is drawn, with
+                    // the error shrinking towards the right-hand end.
+                    int rollX = cd.x;
+                    int rollW = juce::jmax(1, cd.width);
                     int localX = juce::jlimit(0, rollW - 1, relPos.x - rollX);
                     int step = juce::jlimit(0, kSteps - 1, localX * kSteps / rollW);
-                    if (relPos.x < rollX)
-                        step = 0;
 
                     if (cd.noteStepIds[step].isEmpty())
                         return;
@@ -1272,26 +1302,27 @@ void PatchCanvas::mouseDown(const juce::MouseEvent& e)
             {
                 if (!td.partialArrows) continue;
 
-                // Arrow row geometry (mirrors paintTextDisplays)
-                float dh      = static_cast<float>(td.height);
-                float renderH = juce::jmin(dh, 13.0f);
-                float renderY = td.y + (dh - renderH) * 0.5f;
-                float arrowY  = renderY + renderH + 1.0f;
-                float arrowH  = 8.0f;
-
-                juce::Rectangle<float> arrowRect(static_cast<float>(td.x), arrowY,
-                                                 static_cast<float>(td.width), arrowH);
-                if (!arrowRect.contains(relPos.toFloat())) continue;
+                // Arrow geometry comes from the helper the drawing uses, so what
+                // is drawn and what is clickable cannot drift apart.
+                const auto pa = partialArrowRects(*theme, td);
+                const bool onLeft  = pa.left.contains(relPos.toFloat());
+                const bool onRight = pa.right.contains(relPos.toFloat());
+                if (!onLeft && !onRight) continue;
 
                 auto* param     = findParameter(m, td.componentId);   // p2
-                auto* fineParam = findParameter(m, "p3");              // fine detune
+                // Fine detune: p3 on the slave oscillators, but the SineBank lays out
+                // coarse/fine/level in threes, so its fine is the param after coarse.
+                juce::String fineId = "p3";
+                if (m.getDescriptor()->index == 106 && td.componentId.startsWith("p"))
+                    fineId = "p" + juce::String(td.componentId.substring(1).getIntValue() + 1);
+                auto* fineParam = findParameter(m, fineId);
                 if (param == nullptr) continue;
 
                 static const int kSnaps[]  = {4, 16, 28, 40, 52, 64, 76, 88, 100, 112, 124};
                 static const int kNumSnaps = 11;
                 int val    = param->getValue();
                 int newVal = val;
-                bool goUp  = (relPos.x > td.x + td.width / 2);
+                bool goUp  = onRight;
 
                 if (goUp)
                 {
@@ -1402,41 +1433,108 @@ void PatchCanvas::mouseDown(const juce::MouseEvent& e)
                 menu.addItem(4, "Copy");
                 menu.addSeparator();
                 menu.addItem(6, "Initialize Module");
-                menu.addItem(7, "Exclude from Mutation", true, modPtr->isExcludedFromMutation());
+                menu.addItem(7, "Exclude from Random & Mutation", true, modPtr->isExcludedFromMutation());
+
+                // Replace with another module of the same family, keeping the
+                // cables, values and assignments that carry over
+                // (ModuleReplacement). Each entry says what it would cost in
+                // cables, so nothing is lost by surprise.
+                static constexpr int kReplaceMenuBase = 100000;
+                if (moduleDescs != nullptr && area.container != nullptr)
+                {
+                    std::vector<ModuleReplacement::ConnectorRef> used;
+                    for (auto& conn : area.container->getConnections())
+                        for (auto& c : modPtr->getConnectors())
+                            if (&c == conn.output || &c == conn.input)
+                                used.push_back({ c.getDescriptor()->index, c.getDescriptor()->isOutput });
+
+                    juce::PopupMenu replaceMenu;
+                    for (auto* candidate : ModuleReplacement::candidates(*moduleDescs, *modPtr->getDescriptor()))
+                    {
+                        const auto plan = ModuleReplacement::plan(*modPtr->getDescriptor(), *candidate, used);
+                        int droppedCables = 0;
+                        for (auto& conn : area.container->getConnections())
+                        {
+                            bool lost = false;
+                            for (auto& c : modPtr->getConnectors())
+                                if ((&c == conn.output || &c == conn.input)
+                                    && !plan.mapConnector({ c.getDescriptor()->index, c.getDescriptor()->isOutput }))
+                                    lost = true;
+                            droppedCables += lost ? 1 : 0;
+                        }
+
+                        juce::String label = candidate->fullname + " (" + formatDspCost(candidate->cycles) + ")";
+                        if (droppedCables > 0)
+                            label << " - drops " << droppedCables << (droppedCables == 1 ? " cable" : " cables");
+                        replaceMenu.addItem(kReplaceMenuBase + candidate->index, label,
+                                            area.container->canAdd(*candidate));
+                    }
+                    if (replaceMenu.getNumItems() > 0)
+                        menu.addSubMenu("Replace with", replaceMenu);
+                }
+
                 menu.addSeparator();
                 menu.addItem(5, "Delete Module");
 
-                // KeyQuantizer (m98): scale presets. Module exposes 12 binary
-                // note toggles, but the param order is offset — params p3..p14
-                // map to E,F,F#,G,G#,A,Bb,B,C,C#,D,D#. The lambda below maps
-                // chromatic semitone (C=0..B=11) to the matching component-id.
-                // Result IDs >= 100 are reserved for scale presets.
+                // KeyQuantizer (m98): scale presets on any root (KeyQuantScales).
+                // What the switches spell now is shown on top and ticked in the
+                // lists. Result IDs are kScaleMenuBase + root * stride + scale.
+                static constexpr int kScaleMenuBase = 200000;
+                static constexpr int kScaleMenuStride = 64;
                 const bool isKeyQuant = (modPtr->getDescriptor()->index == 98);
                 if (isKeyQuant)
                 {
-                    juce::PopupMenu scales;
-                    scales.addItem(100, "Chromatic");
-                    scales.addSeparator();
-                    scales.addItem(101, "Major (Ionian)");
-                    scales.addItem(102, "Natural Minor (Aeolian)");
-                    scales.addItem(103, "Harmonic Minor");
-                    scales.addItem(104, "Melodic Minor");
-                    scales.addSeparator();
-                    scales.addItem(105, "Dorian");
-                    scales.addItem(106, "Phrygian");
-                    scales.addItem(107, "Lydian");
-                    scales.addItem(108, "Mixolydian");
-                    scales.addItem(109, "Locrian");
-                    scales.addSeparator();
-                    scales.addItem(110, "Pentatonic Major");
-                    scales.addItem(111, "Pentatonic Minor");
-                    scales.addItem(112, "Blues Major");
-                    scales.addItem(113, "Blues Minor");
-                    scales.addSeparator();
-                    scales.addItem(114, "Whole Tone");
-                    scales.addItem(115, "Diminished (W-H)");
+                    std::uint16_t current = 0;
+                    for (int pc = 0; pc < 12; ++pc)
+                        if (auto* p = findParameter(*modPtr, KeyQuantScales::pitchComponentId(pc)))
+                            if (p->getValue() != 0)
+                                current = static_cast<std::uint16_t>(current | (1u << pc));
+
+                    const auto& scales = KeyQuantScales::all();
+                    const auto found = KeyQuantScales::matches(current);
+                    const auto isCurrent = [&found](int scale, int root) {
+                        return std::find(found.begin(), found.end(), std::make_pair(scale, root)) != found.end();
+                    };
+
+                    juce::String now;
+                    if (found.empty())
+                        now = current == 0 ? "No notes" : "Custom notes";
+                    for (size_t i = 0; i < found.size() && i < 3; ++i)
+                    {
+                        const auto [scale, root] = found[i];
+                        if (now.isNotEmpty()) now << ", ";
+                        if (scale != KeyQuantScales::chromaticIndex())
+                            now << KeyQuantScales::rootName(root) << " ";
+                        now << scales[static_cast<size_t>(scale)].name;
+                    }
+                    if (found.size() > 3)
+                        now << " +" << static_cast<int>(found.size() - 3);
+
+                    juce::PopupMenu scaleMenu;
+                    scaleMenu.addSectionHeader("Now: " + now);
+                    const int chromatic = KeyQuantScales::chromaticIndex();
+                    scaleMenu.addItem(kScaleMenuBase + chromatic, "Chromatic (all notes)", true,
+                                      isCurrent(chromatic, 0));
+                    scaleMenu.addSeparator();
+                    for (int root = 0; root < 12; ++root)
+                    {
+                        juce::PopupMenu rootMenu;
+                        bool rootTicked = false;
+                        for (int i = 0; i < static_cast<int>(scales.size()); ++i)
+                        {
+                            if (i == chromatic)
+                                continue;
+                            const bool ticked = isCurrent(i, root);
+                            rootTicked = rootTicked || ticked;
+                            rootMenu.addItem(kScaleMenuBase + root * kScaleMenuStride + i,
+                                             juce::String(KeyQuantScales::rootName(root)) + " "
+                                                 + scales[static_cast<size_t>(i)].name,
+                                             true, ticked);
+                        }
+                        scaleMenu.addSubMenu(KeyQuantScales::rootName(root), rootMenu, true, nullptr, rootTicked);
+                    }
                     menu.addSeparator();
-                    menu.addSubMenu("Scales (root C)", scales);
+                    menu.addSubMenu("Scale", scaleMenu);
                 }
 
                 // DrumSynth (m58): the preset library. It used to be reachable
@@ -1526,45 +1624,21 @@ void PatchCanvas::mouseDown(const juce::MouseEvent& e)
                             modPtr->setExcludedFromMutation(!modPtr->isExcludedFromMutation());
                             repaint();
                         }
-                        else if (result >= 100 && result < 200)
+                        else if (result >= kScaleMenuBase
+                                 && result < kScaleMenuBase + 12 * kScaleMenuStride)
                         {
-                            // KeyQuantizer scale presets. mask is a 12-bit
-                            // chromatic bitmap (bit0=C..bit11=B); each bit set
-                            // means "note enabled in scale".
-                            // Bit n set = semitone n enabled (n=0..11, 0=C, 11=B).
-                            // Masks mirror the VCV Fundamental Quantizer presets
-                            // (https://github.com/VCVRack/Fundamental/tree/v2/presets/Quantizer).
-                            int mask = 0;
-                            switch (result)
-                            {
-                                case 100: mask = 0xFFF; break; // Chromatic
-                                case 101: mask = 0xAB5; break; // Major (0,2,4,5,7,9,11)
-                                case 102: mask = 0x5AD; break; // Natural Minor (0,2,3,5,7,8,10)
-                                case 103: mask = 0x9AD; break; // Harmonic Minor (0,2,3,5,7,8,11)
-                                case 104: mask = 0xAAD; break; // Melodic Minor asc (0,2,3,5,7,9,11)
-                                case 105: mask = 0x6AD; break; // Dorian (0,2,3,5,7,9,10)
-                                case 106: mask = 0x5AB; break; // Phrygian (0,1,3,5,7,8,10)
-                                case 107: mask = 0xAD5; break; // Lydian (0,2,4,6,7,9,11)
-                                case 108: mask = 0x6B5; break; // Mixolydian (0,2,4,5,7,9,10)
-                                case 109: mask = 0x56B; break; // Locrian (0,1,3,5,6,8,10)
-                                case 110: mask = 0x295; break; // Pentatonic Major (0,2,4,7,9)
-                                case 111: mask = 0x4A9; break; // Pentatonic Minor (0,3,5,7,10)
-                                case 112: mask = 0x29D; break; // Blues Major (0,2,3,4,7,9)
-                                case 113: mask = 0x4E9; break; // Blues Minor (0,3,5,6,7,10)
-                                case 114: mask = 0x555; break; // Whole Tone (0,2,4,6,8,10)
-                                case 115: mask = 0xB6D; break; // Diminished W-H (0,2,3,5,6,8,9,11)
-                                default:  return;
-                            }
-                            // Chromatic semitone → KeyQuant component-id
-                            //   C(0)→p11, C#(1)→p12, D(2)→p13, D#(3)→p14,
-                            //   E(4)→p3,  F(5)→p4,   F#(6)→p5, G(7)→p6,
-                            //   G#(8)→p7, A(9)→p8,   Bb(10)→p9, B(11)→p10
-                            static const char* const SEMI_TO_PID[12] = {
-                                "p11","p12","p13","p14","p3","p4","p5","p6","p7","p8","p9","p10"
-                            };
+                            // Key Quantizer scale preset: scale and root come out
+                            // of the result ID, the switches out of KeyQuantScales.
+                            const int offset = result - kScaleMenuBase;
+                            const int root = offset / kScaleMenuStride;
+                            const int scaleIndex = offset % kScaleMenuStride;
+                            const auto& scales = KeyQuantScales::all();
+                            if (scaleIndex >= static_cast<int>(scales.size()))
+                                return;
+                            const int mask = KeyQuantScales::maskFor(scales[static_cast<size_t>(scaleIndex)], root);
                             for (int s = 0; s < 12; ++s)
                             {
-                                auto* p = findParameter(*modPtr, SEMI_TO_PID[s]);
+                                auto* p = findParameter(*modPtr, KeyQuantScales::pitchComponentId(s));
                                 if (p == nullptr) continue;
                                 int newVal = (mask >> s) & 1;
                                 if (p->getValue() == newVal) continue;
@@ -1576,6 +1650,18 @@ void PatchCanvas::mouseDown(const juce::MouseEvent& e)
                                 if (paramDragCompleteCallback)
                                     paramDragCompleteCallback(sec, modPtr->getContainerIndex(), pd->index, oldVal, newVal);
                             }
+                            repaint();
+                        }
+                        else if (result >= kReplaceMenuBase && result < kReplaceMenuBase + 1024)
+                        {
+                            if (undoManager)
+                                undoManager->beginNewTransaction("Replace Module");
+                            // Same as a delete: the module about to be freed must
+                            // not still be selected (issue #61).
+                            if (isSelected(modPtr))
+                                clearSelection();
+                            if (replaceModuleCallback)
+                                replaceModuleCallback(sec, modPtr, result - kReplaceMenuBase);
                             repaint();
                         }
                         else if (result >= drumPresetSaveId)
@@ -1896,6 +1982,14 @@ void PatchCanvas::mouseDown(const juce::MouseEvent& e)
 void PatchCanvas::mouseDrag(const juce::MouseEvent& e)
 {
     if (dragState.type == DragState::None)
+        return;
+
+    // A button acts on the press and has nothing to drag. Left to fall through,
+    // the pointer drifting a pixel during the click (a trackpad does it all the
+    // time) took the generic path below, which resets the parameter to the value
+    // it had when the press began and sends that to the synth: the new value
+    // went out, then the old one a few milliseconds behind it (issue #82).
+    if (dragState.type == DragState::Button)
         return;
 
     auto currentPos = screenToCanvas(e.getPosition());
@@ -2796,15 +2890,34 @@ bool PatchCanvas::keyPressed(const juce::KeyPress& key)
         return true;
     }
 
+    // JUCE's X11 layer folds the numeric keypad onto the main keyboard before
+    // the key ever reaches a component, and it folds KP_Subtract onto XK_hyphen
+    // (0xad, the soft hyphen) where KP_Add lands on a plain '+'. So the keypad's
+    // plus was recognised and its minus arrived as a code nothing here tested
+    // for, on knobs as much as on the arrows. numberPadSubtract is never
+    // delivered on Linux at all, but it still is on the other platforms, so both
+    // stay in the test.
+    constexpr int softHyphen = 0xad;   // XK_hyphen: what KP_Subtract becomes on X11
+
+    auto isPlusKey = [](int code)
+    {
+        return code == '+' || code == '=' || code == juce::KeyPress::numberPadAdd;
+    };
+    auto isMinusKey = [softHyphen](int code)
+    {
+        return code == '-' || code == '_' || code == softHyphen
+            || code == juce::KeyPress::numberPadSubtract;
+    };
+
     // Ctrl++ → Zoom In, Ctrl+- → Zoom Out
     if (key.getModifiers().isCommandDown())
     {
-        if (key.getKeyCode() == '+' || key.getKeyCode() == '=' || key.getKeyCode() == juce::KeyPress::numberPadAdd)
+        if (isPlusKey(key.getKeyCode()))
         {
             setZoomLevel(zoomLevel + zoomStep);
             return true;
         }
-        if (key.getKeyCode() == '-' || key.getKeyCode() == juce::KeyPress::numberPadSubtract)
+        if (isMinusKey(key.getKeyCode()))
         {
             setZoomLevel(zoomLevel - zoomStep);
             return true;
@@ -2819,9 +2932,9 @@ bool PatchCanvas::keyPressed(const juce::KeyPress& key)
     {
         const int code = key.getKeyCode();
         int delta = 0;
-        if (code == '+' || code == '=' || code == juce::KeyPress::numberPadAdd)
+        if (isPlusKey(code))
             delta = 1;
-        else if (code == '-' || code == '_' || code == juce::KeyPress::numberPadSubtract)
+        else if (isMinusKey(code))
             delta = -1;
 
         if (delta != 0 && spinnerTarget.module.isValid())
@@ -2839,13 +2952,10 @@ bool PatchCanvas::keyPressed(const juce::KeyPress& key)
         return true;
     }
 
-    // Z → zoom-to-selection (if any) or reset to 100%
+    // Z → zoom to the selection; Z again goes back to where it was. Nothing selected: reset to 100%
     if (key.getTextCharacter() == 'z' && !key.getModifiers().isCommandDown())
     {
-        if (hasSelection())
-            zoomToSelection();
-        else
-            resetZoom();
+        toggleZoomToSelection();
         return true;
     }
 

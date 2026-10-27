@@ -52,6 +52,29 @@ field at the top of the Inspector. Renaming is a normal, undoable edit
 (`Ctrl+Z` takes it back). The name reaches the synth as you type it, so storing
 the patch to a bank right afterwards keeps the names you gave.
 
+## Replacing a module
+
+To try a FilterD where a FilterE is, right-click the module and open
+**Replace with**. It lists the module's own family, each entry with its DSP
+share and, when it applies, how many cables it would drop. The new module takes
+the old one's place in a single undoable step (`Ctrl+Z` brings the old one back
+exactly as it was).
+
+What carries over:
+
+- **Position**, and the **name** if you had renamed the module.
+- **Cables** on connectors the new module also has, matched by name. Where the
+  names differ, a cable only moves when there is no choice to make: a FilterD
+  wired from its `lp` output keeps that cable on a FilterE's single `out`.
+- **Values** of parameters with the same name and range, such as resonance.
+- **Knob, morph and MIDI CC assignments** on those parameters.
+
+Everything else is dropped rather than guessed. An OscA's `sync` cable does
+not end up on an OscB's FM input just because both are audio inputs. The status
+bar says how many cables and assignments were dropped. A taller module pushes
+the ones below it down the column; if the column has no room, the replacement
+is refused and nothing changes.
+
 ## Comments
 
 A comment is a text note that lives on the canvas: what a module does, which knob
@@ -143,6 +166,17 @@ with the patch when you share it.
   is *not* displaying, so a suboscillator can be set to `-12(Oct)` and checked in
   hertz without changing anything. The choice belongs to the module and is saved
   with the patch.
+- **Read sequencer steps as note names** in Editor Options (`Ctrl+,`) changes
+  what a note sequencer's steps say, everywhere a value is shown: hovering one,
+  dragging it, the `F5` overlay and the Inspector. NoteSeqB's steps become
+  pitches on the same 60 = C4 its piano roll is drawn around, so a step reads
+  `C4` or `F#4` instead of `60` or `66`. NoteSeqA's are a bipolar control value
+  with its zero at 64, and only become a pitch once they reach an oscillator, so
+  those read as the interval they transpose by: `0`, `+7 (G)`, `-1 (B)`. The
+  setting is the editor's rather than the patch's, and it is off by default, so
+  a patch reads the way the original editor writes it until you ask otherwise.
+  The Inspector accepts what it shows, so with the setting on you can type `C4`
+  into a NoteSeqB step.
 
 ## Reading a patch: the overlay keys
 
@@ -174,6 +208,23 @@ sequencers, filters, the DrumSynth, anything. They live in a **Presets** folder
 in your patch library as one `.pchp` pack per module type; see
 [Files & Formats](06-files-and-formats.md#pchp-module-presets).
 
+### Key Quantizer scales
+
+The Key Quantizer's right-click menu has a **Scale** submenu. It opens with the
+scale its note switches spell right now, then **Chromatic**, then one list per
+root note, **C** to **B**. Pick **D > D Dorian** and the twelve switches are set
+for it. The switches do not say which note is the root, so every scale that
+uses the same notes is ticked: the white keys are C Major, A Natural Minor and
+D Dorian at once. Notes that match no scale read **Custom notes**.
+
+Besides the major and minor scales, the modes, pentatonics, blues and
+whole-tone scale, there are Phrygian Dominant (Andalusian), Double Harmonic,
+Hungarian Minor, Neapolitan Minor and Major, Hirajoshi, In-sen and both
+diminished scales.
+
+Choosing a scale sets the switches one by one, so `Ctrl+Z` takes it back one
+switch at a time.
+
 ## Morphs
 
 The four morph groups from the header bar work like the hardware's: assign
@@ -187,8 +238,15 @@ parameter's swept range.
 ## Randomize, initialize, locks
 
 - `Ctrl+R` randomizes parameters (uniform); `Ctrl+Shift+R` uses a gaussian
-  spread around current values.
-- Locked parameters and excluded modules are never touched.
+  spread around the middle of each parameter's range. With modules selected,
+  only those are randomized.
+- **Excluding modules.** Right-click a module and tick **Exclude from Random &
+  Mutation**, or select several and do it from the selection's right-click
+  menu. Excluded modules get a red frame, and `Ctrl+R`, `Ctrl+Shift+R`, the
+  Patch Mutator and the MCP bridge's `mutate_patch` all leave them alone. The
+  status bar says how many were skipped.
+- Locked parameters are never touched either, and neither are on/off switches,
+  mutes, levels or bypasses, so a randomize does not silence the patch.
 - Initialize resets a patch to a clean state.
 
 For evolutionary sound design with breeding and interpolation, see the

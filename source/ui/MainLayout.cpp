@@ -9,6 +9,8 @@ constexpr const char* SlotBar::slotLetters[];
 
 SlotBar::SlotBar()
 {
+    for (auto& f : loadFraction)
+        f = -1.0f;
     setInterceptsMouseClicks(true, false);
     startTimer(450);  // hardware-style blink for the focused slot's LED
 }
@@ -21,8 +23,11 @@ SlotBar::~SlotBar()
 void SlotBar::timerCallback()
 {
     blinkPhase = !blinkPhase;
+    if (loadProvider)
+        for (int synth = 0; synth < kMaxSynths; ++synth)
+            setLoad(synth, loadProvider(synth));
     for (int i = 0; i < numSlots; ++i)
-        repaint(ledBounds(i));
+        repaint(slotBounds[i]);
 }
 
 void SlotBar::setCurrentTab(int index)
@@ -52,14 +57,15 @@ void SlotBar::setSlotLocal(int slot, bool local)
     }
 }
 
-void SlotBar::setSlotsEnabled(const std::array<bool, 4>& enabled)
+void SlotBar::setSlotsEnabled(int synth, const std::array<bool, 4>& enabled)
 {
     bool changed = false;
-    for (int i = 0; i < numSlots; ++i)
+    for (int l = 0; l < kSlotsPerSynth; ++l)
     {
-        if (slotEnabledFlags[i] != enabled[static_cast<size_t>(i)])
+        const int i = SynthSlot::global(synth, l);
+        if (slotEnabledFlags[i] != enabled[static_cast<size_t>(l)])
         {
-            slotEnabledFlags[i] = enabled[static_cast<size_t>(i)];
+            slotEnabledFlags[i] = enabled[static_cast<size_t>(l)];
             changed = true;
         }
     }
@@ -67,131 +73,202 @@ void SlotBar::setSlotsEnabled(const std::array<bool, 4>& enabled)
         repaint();
 }
 
-juce::Rectangle<int> SlotBar::ledBounds(int slot) const
+void SlotBar::setSynthName(int synth, const juce::String& name)
 {
-    // Small round LED at the right edge of the slot row
-    auto bounds = slotBounds[slot];
-    return { bounds.getRight() - 16, bounds.getCentreY() - 5, 10, 10 };
+    if (synth < 0 || synth >= kMaxSynths || synthName[synth] == name)
+        return;
+    synthName[synth] = name;
+    repaint(nameBounds[synth]);
+}
+
+void SlotBar::setLoad(int synth, float fraction)
+{
+    if (synth < 0 || synth >= kMaxSynths)
+        return;
+    fraction = fraction < 0.0f ? -1.0f : juce::jlimit(0.0f, 1.0f, fraction);
+    if (juce::approximatelyEqual(loadFraction[synth], fraction))
+        return;
+    loadFraction[synth] = fraction;
+    repaint(loadBounds[synth]);
+}
+
+void SlotBar::setRowShown(int synth, bool shown)
+{
+    if (synth < 0 || synth >= kMaxSynths || rowShown[synth] == shown)
+        return;
+    rowShown[synth] = shown;
+    resized();
+    repaint();
+    if (onRowsChanged)
+        onRowsChanged();
+}
+
+void SlotBar::setSlotCount(int synth, int count)
+{
+    count = juce::jlimit(1, kSlotsPerSynth, count);
+    if (synth < 0 || synth >= kMaxSynths || slotCounts[synth] == count)
+        return;
+    slotCounts[synth] = count;
+    resized();
+    repaint();
+}
+
+int SlotBar::getPreferredHeight() const
+{
+    int rows = 0;
+    for (bool shown : rowShown)
+        rows += shown ? 1 : 0;
+    return kHeaderH + kRowH * juce::jmax(1, rows) + kBottomPad;
+}
+
+void SlotBar::setWaitingEmulators(int count)
+{
+    if (waitingEmulators == count)
+        return;
+    waitingEmulators = count;
+    repaint(0, 0, getWidth(), kHeaderH);
 }
 
 void SlotBar::resized()
 {
-    auto area = getLocalBounds();
-    static constexpr int rowH = 24;
-    for (int i = 0; i < numSlots; ++i)
-        slotBounds[i] = area.removeFromTop(rowH);
-}
-
-void SlotBar::drawSlotIcon(juce::Graphics& g, juce::Rectangle<int> area, bool active)
-{
-    // Simple synth/keyboard icon
-    auto iconArea = area.toFloat().reduced(1.0f);
-    float x = iconArea.getX(), y = iconArea.getY();
-    float w = iconArea.getWidth(), h = iconArea.getHeight();
-
-    // Body
-    g.setColour(active ? juce::Colour(0xffcc3333) : AppTheme::palette().borderColor);
-    g.fillRoundedRectangle(x, y, w, h, 2.0f);
-
-    // Keys (bottom half)
-    float keyY = y + h * 0.55f;
-    float keyH = h * 0.35f;
-    int nKeys = 5;
-    float keyW = (w - 4.0f) / nKeys;
-    g.setColour(juce::Colours::white.withAlpha(active ? 0.9f : 0.5f));
-    for (int k = 0; k < nKeys; ++k)
+    auto all = getLocalBounds().withTrimmedTop(kHeaderH).withTrimmedBottom(kBottomPad);
+    static constexpr int numW = 16, buttonW = 25;
+    for (int synth = 0; synth < kMaxSynths; ++synth)
     {
-        float kx = x + 2.0f + k * keyW;
-        g.fillRect(kx + 0.5f, keyY, keyW - 1.0f, keyH);
-    }
-
-    // Knobs (top half)
-    float knobY = y + h * 0.15f;
-    float knobR = juce::jmin(keyW * 0.3f, h * 0.12f);
-    g.setColour(juce::Colours::white.withAlpha(active ? 0.7f : 0.35f));
-    for (int k = 0; k < 3; ++k)
-    {
-        float kx = x + w * 0.2f + k * w * 0.25f;
-        g.fillEllipse(kx - knobR, knobY - knobR, knobR * 2, knobR * 2);
+        if (! rowShown[synth])
+        {
+            // Nothing on screen, so nothing to click or drop onto either.
+            for (int l = 0; l < kSlotsPerSynth; ++l)
+                slotBounds[SynthSlot::global(synth, l)] = {};
+            numBounds[synth] = nameBounds[synth] = loadBounds[synth] = {};
+            continue;
+        }
+        // A row: the synth's number, its four slot buttons, its name; the DSP load is a thin bar
+        // under the buttons and the name.
+        auto row = all.removeFromTop(kRowH).reduced(10, 4);
+        auto load = row.removeFromBottom(4);
+        row.removeFromBottom(3);
+        numBounds[synth] = row.removeFromLeft(numW);
+        row.removeFromLeft(2);
+        const int firstButtonX = row.getX();
+        for (int l = 0; l < kSlotsPerSynth; ++l)
+            slotBounds[SynthSlot::global(synth, l)] =
+                l < slotCounts[synth] ? row.removeFromLeft(buttonW).withTrimmedRight(3) : juce::Rectangle<int>();
+        row.removeFromLeft(3);
+        nameBounds[synth] = row;
+        loadBounds[synth] = load.withTrimmedLeft(firstButtonX - load.getX());
     }
 }
 
 void SlotBar::paint(juce::Graphics& g)
 {
-    g.fillAll(AppTheme::palette().backgroundPanel);
+    const auto& pal = AppTheme::palette();
+    g.fillAll(pal.backgroundPanel);
+
+    // The rule that ends the inspector, then the header: what this is, and how many synths.
+    g.setColour(pal.borderColor);
+    g.fillRect(0, 0, getWidth(), 1);
+    auto header = juce::Rectangle<int>(10, 6, getWidth() - 20, kHeaderH - 8);
+    g.setColour(pal.textMuted);
+    g.setFont(AppTheme::uiFont(11.0f).withStyle("Bold"));
+    g.drawText("SYNTHS", header, juce::Justification::centredLeft, false);
+    int connected = 0;
+    for (int synth = 0; synth < kMaxSynths; ++synth)
+        if (synthName[synth].isNotEmpty())
+            ++connected;
+    juce::String count = juce::String(connected) + " / " + juce::String(kMaxSynths);
+    g.setColour(pal.textSecondary);
+    g.setFont(AppTheme::uiFont(11.0f));
+    if (waitingEmulators > 0)
+    {
+        // More emulators than ports: the ones left out are counted where it shows.
+        count = "+" + juce::String(waitingEmulators) + " G1-Emu waiting, ports full   " + count;
+        g.setColour(pal.accentWarning);
+    }
+    g.drawText(count, header, juce::Justification::centredRight, true);
 
     for (int i = 0; i < numSlots; ++i)
     {
-        auto bounds = slotBounds[i];
-        bool active = (i == activeIndex);
+        if (slotBounds[i].isEmpty())
+            continue;   // its synth's row is hidden
+        auto b = slotBounds[i].toFloat();
+        const bool active = (i == activeIndex);
 
-        // Background
-        if (active)
-            g.setColour(juce::Colour(0xff3a3a3a));
-        else
-            g.setColour(AppTheme::palette().backgroundPanel);
-        g.fillRect(bounds);
-
-        // Left border highlight for active
-        if (active)
-        {
-            g.setColour(AppTheme::palette().borderColor);
-            g.fillRect(bounds.getX(), bounds.getY(), 3, bounds.getHeight());
-        }
-
-        // A patch is being dragged over this row and would land here. Drawn over
-        // the row's own background and under everything else, so the letter and
-        // the name stay readable.
+        // A patch is being dragged over this button and would land in this slot.
         if (i == dropTargetSlot)
         {
-            g.setColour(AppTheme::palette().accentActive.withAlpha(0.25f));
-            g.fillRect(bounds);
-            g.setColour(AppTheme::palette().accentActive);
-            g.drawRect(bounds, 2);
+            g.setColour(pal.accentActive.withAlpha(0.35f));
+            g.fillRoundedRectangle(b.expanded(1.0f), 5.0f);
         }
 
-        // Icon (small fixed-size synth)
-        auto iconArea = bounds.removeFromLeft(20).reduced(2);
-        drawSlotIcon(g, iconArea, active);
+        g.setColour(active ? pal.buttonActive : pal.buttonBackground);
+        g.fillRoundedRectangle(b, 5.0f);
+        g.setColour(i == dropTargetSlot ? pal.accentActive : active ? pal.buttonActive : pal.borderColor);
+        g.drawRoundedRectangle(b.reduced(0.5f), 5.0f, 1.0f);
 
-        // Text: "A : PatchName" (leave room for the LED on the right, and for
-        // the LOCAL badge when this slot is not synced to the synth)
-        auto textArea = bounds.reduced(4, 0).withTrimmedRight(slotLocalFlags[i] ? 62 : 16);
-        juce::String label = juce::String(slotLetters[i]) + " : ";
-        if (slotNames[i].isNotEmpty())
-            label += slotNames[i];
+        g.setColour(active ? juce::Colours::white
+                           : slotEnabledFlags[i] ? pal.textPrimary : pal.textSecondary.withAlpha(0.5f));
+        g.setFont(AppTheme::uiFont(12.0f).withStyle("Bold"));
+        g.drawText(slotLetters[SynthSlot::localOf(i)], slotBounds[i], juce::Justification::centred);
 
-        g.setColour(active ? juce::Colours::white : AppTheme::palette().textSecondary);
-        g.setFont(AppTheme::uiFont(12.0f));
-        g.drawText(label, textArea, juce::Justification::centredLeft, true);
+        // The slot LED, as a bar under the letter: blinking = focused, fixed =
+        // enabled, off = disabled. Ctrl+click the button to toggle enable.
+        const bool ledOn = active ? blinkPhase : slotEnabledFlags[i];
+        g.setColour(ledOn ? juce::Colour(0xff44cc44) : juce::Colour(0xff2a3a2a));
+        g.fillRoundedRectangle(b.getX() + 5.0f, b.getBottom() - 5.0f, b.getWidth() - 10.0f, 2.0f, 1.0f);
 
-        // "LOCAL" badge: this slot's editor patch is not known to match the
-        // synth (loaded Local, or edited/loaded while disconnected).
+        // "LOCAL": this slot's editor patch is not known to match the synth
+        // (loaded Local, or edited/loaded while disconnected).
         if (slotLocalFlags[i])
         {
-            auto row = slotBounds[i];
-            juce::Rectangle<int> badge(row.getRight() - 16 - 44, row.getCentreY() - 8, 42, 16);
             g.setColour(juce::Colour(0xffd08a2c));
-            g.fillRoundedRectangle(badge.toFloat(), 3.0f);
-            g.setColour(juce::Colours::black);
-            g.setFont(AppTheme::uiFont(9.0f).withStyle("Bold"));
-            g.drawText("LOCAL", badge, juce::Justification::centred);
+            g.fillEllipse(b.getRight() - 7.0f, b.getY() + 2.0f, 5.0f, 5.0f);
         }
+    }
 
-        // Slot LED, mirroring the hardware: blinking = focused, fixed =
-        // enabled, off = disabled. Ctrl+click the row to toggle enable.
-        auto led = ledBounds(i).toFloat();
-        bool ledOn = active ? blinkPhase : slotEnabledFlags[i];
-        g.setColour(ledOn ? juce::Colour(0xff44cc44) : juce::Colour(0xff2a3a2a));
-        g.fillEllipse(led);
-        g.setColour(AppTheme::palette().borderColor);
-        g.drawEllipse(led, 1.0f);
+    for (int synth = 0; synth < kMaxSynths; ++synth)
+    {
+        if (! rowShown[synth])
+            continue;
+        const bool hasSynth = synthName[synth].isNotEmpty();
+        const bool beingEdited = (synth == SynthSlot::synthOf(activeIndex));
 
-        // Bottom separator
-        g.setColour(AppTheme::palette().buttonActive);
-        g.drawHorizontalLine(slotBounds[i].getBottom() - 1,
-                             static_cast<float>(slotBounds[i].getX()),
-                             static_cast<float>(slotBounds[i].getRight()));
+        // The synth's number, lit when it is the synth being edited
+        g.setColour(beingEdited ? pal.accentActive : pal.textMuted);
+        g.setFont(AppTheme::uiFont(12.0f).withStyle("Bold"));
+        g.drawText(juce::String(synth + 1), numBounds[synth], juce::Justification::centred, false);
+
+        // Its name: a pill with a connection dot; filled when it is the synth being edited
+        auto name = nameBounds[synth].toFloat();
+        g.setColour(! hasSynth ? pal.inputBackground
+                               : beingEdited ? pal.buttonActive : pal.buttonBackground);
+        g.fillRoundedRectangle(name, 5.0f);
+        g.setColour(beingEdited && hasSynth ? pal.buttonActive : pal.borderColor);
+        g.drawRoundedRectangle(name.reduced(0.5f), 5.0f, 1.0f);
+
+        g.setColour(hasSynth ? juce::Colour(0xff7bc47f) : pal.textMuted.withAlpha(0.6f));
+        g.fillEllipse(name.getX() + 8.0f, name.getCentreY() - 3.5f, 7.0f, 7.0f);
+
+        const float load = loadFraction[synth];
+        g.setColour(! hasSynth ? pal.textMuted : beingEdited ? juce::Colours::white : pal.textPrimary);
+        g.setFont(AppTheme::uiFont(12.0f));
+        auto text = name.withTrimmedLeft(21.0f).withTrimmedRight(6.0f);
+        g.drawText(hasSynth ? synthName[synth] : "No synth", text.toNearestInt(), juce::Justification::centredLeft, true);
+
+        // The load: a thin track under the row, green to amber to red
+        const auto lb = loadBounds[synth];
+        if (lb.getWidth() > 8)
+        {
+            auto bar = lb.toFloat().withSizeKeepingCentre(static_cast<float>(lb.getWidth()), 3.0f);
+            g.setColour(pal.inputBackground);
+            g.fillRoundedRectangle(bar, 1.5f);
+            if (load >= 0.0f)
+            {
+                g.setColour(load < 0.6f ? juce::Colour(0xff5a9a5a)
+                          : load < 0.85f ? juce::Colour(0xffb0a030) : juce::Colour(0xffcb4f4f));
+                g.fillRoundedRectangle(bar.withWidth(juce::jmax(2.0f, bar.getWidth() * juce::jlimit(0.0f, 1.0f, load))), 1.5f);
+            }
+        }
     }
 }
 
@@ -256,9 +333,28 @@ void SlotBar::itemDropped(const SourceDetails& details)
         onPatchFileDroppedOnSlot(SlotDrop::fileOf(d), slot);
 }
 
+void SlotBar::mouseDoubleClick(const juce::MouseEvent& e)
+{
+    for (int synth = 0; synth < kMaxSynths; ++synth)
+        if (nameBounds[synth].contains(e.getPosition()) && synthName[synth].isNotEmpty())
+        {
+            if (onSynthRenameRequested)
+                onSynthRenameRequested(synth);
+            return;
+        }
+}
+
 void SlotBar::mouseDown(const juce::MouseEvent& e)
 {
     auto pos = e.getPosition();
+    // A click on a synth's name makes it the synth being edited.
+    for (int synth = 0; synth < kMaxSynths; ++synth)
+        if (nameBounds[synth].contains(pos))
+        {
+            if (synthName[synth].isNotEmpty() && onSynthSelected)
+                onSynthSelected(synth);
+            return;
+        }
     for (int i = 0; i < numSlots; ++i)
     {
         if (!slotBounds[i].contains(pos))
@@ -293,85 +389,6 @@ void SlotBar::mouseDown(const juce::MouseEvent& e)
 }
 
 // ============================================================
-// PanelToggleStrip implementation
-// ============================================================
-
-PanelToggleStrip::PanelToggleStrip(bool leftEdge)
-    : isLeftEdge(leftEdge)
-{
-    setMouseCursor(juce::MouseCursor::PointingHandCursor);
-}
-
-void PanelToggleStrip::setPanelOpen(bool open)
-{
-    if (panelOpen == open)
-        return;
-    panelOpen = open;
-    repaint();
-}
-
-void PanelToggleStrip::paint(juce::Graphics& g)
-{
-    const auto& pal = AppTheme::palette();
-    auto area = getLocalBounds();
-
-    g.setColour(hovered ? pal.buttonActive : pal.backgroundSecondary);
-    g.fillRect(area);
-
-    // Hairline on the canvas-facing edge only, so the strip reads as part of
-    // the panel's chrome rather than as a floating bar.
-    g.setColour(pal.borderColor);
-    if (isLeftEdge)
-        g.drawVerticalLine(area.getRight() - 1, (float) area.getY(), (float) area.getBottom());
-    else
-        g.drawVerticalLine(area.getX(), (float) area.getY(), (float) area.getBottom());
-
-    // Chevron points toward the panel while it is open (click collapses it)
-    // and away from it once collapsed (click brings it back), matching the
-    // slot windows.
-    const float cx = (float) area.getCentreX();
-    const float cy = (float) area.getCentreY();
-    const float s = 4.0f;
-    const bool pointsLeft = (isLeftEdge == panelOpen);
-
-    juce::Path chevron;
-    if (pointsLeft)
-    {
-        chevron.startNewSubPath(cx + s, cy - s * 1.4f);
-        chevron.lineTo(cx - s, cy);
-        chevron.lineTo(cx + s, cy + s * 1.4f);
-    }
-    else
-    {
-        chevron.startNewSubPath(cx - s, cy - s * 1.4f);
-        chevron.lineTo(cx + s, cy);
-        chevron.lineTo(cx - s, cy + s * 1.4f);
-    }
-
-    g.setColour(hovered ? pal.textPrimary : pal.textSecondary);
-    g.strokePath(chevron, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved,
-                                               juce::PathStrokeType::rounded));
-}
-
-void PanelToggleStrip::mouseDown(const juce::MouseEvent&)
-{
-    if (onToggle)
-        onToggle();
-}
-
-void PanelToggleStrip::mouseEnter(const juce::MouseEvent&)
-{
-    hovered = true;
-    repaint();
-}
-
-void PanelToggleStrip::mouseExit(const juce::MouseEvent&)
-{
-    hovered = false;
-    repaint();
-}
-
-// ============================================================
 // MainLayout implementation
 // ============================================================
 
@@ -381,39 +398,41 @@ MainLayout::MainLayout(ModuleDescriptions& moduleDescs)
         if (onSlotChanged)
             onSlotChanged(idx);
     };
+    slotBar.onRowsChanged = [this] { resized(); };
+    slotBar.onSynthRenameRequested = [this](int synth) {
+        if (onSynthRenameRequested)
+            onSynthRenameRequested(synth);
+    };
+    slotBar.onSynthSelected = [this](int synth) {
+        if (onSynthSelected)
+            onSynthSelected(synth);
+    };
     slotBar.onSlotViewToggled = [this](int idx) {
         if (onSlotViewToggled)
             onSlotViewToggled(idx);
     };
 
-    midiButton.onClick = [this]() { if (onMidiSettingsClicked) onMidiSettingsClicked(); };
 
-    libraryButton.onClick = [this]() { if (onLibraryFolderClicked) onLibraryFolderClicked(); };
 
-    storeButton.onClick = [this]() { if (onStoreToBankClicked) onStoreToBankClicked(); };
 
-    // Left column: inspector + toolbar + slots
+    // Left column: inspector + slots
     leftColumn.addAndMakeVisible(inspectorPanel);
-    leftColumn.addAndMakeVisible(midiButton);
-    leftColumn.addAndMakeVisible(libraryButton);
-    leftColumn.addAndMakeVisible(storeButton);
     leftColumn.addAndMakeVisible(slotBar);
 
-    rightBrowserTabs.setTabBarDepth(28);
+    rightBrowserTabs.setTabBarDepth(40);
     rightBrowserTabs.addTab("Synth", AppTheme::palette().backgroundPanel, &patchBrowserPanel, false);
     rightBrowserTabs.addTab("Disk", AppTheme::palette().backgroundPanel, &diskPresetBrowserPanel, false);
 
-    leftToggleStrip.onToggle = [this]() {
+    // The switches live in the status bar, as in Bitwig: an "i" for the inspector, a lens for the browser
+    statusBar.onInspectorClicked = [this]() {
         if (onPanelToggleRequested) onPanelToggleRequested(true);
         else                        setLeftPanelVisible(!leftPanelVisible);
     };
-    rightToggleStrip.onToggle = [this]() {
+    statusBar.onBrowserClicked = [this]() {
         if (onPanelToggleRequested) onPanelToggleRequested(false);
         else                        setRightPanelVisible(!rightPanelVisible);
     };
 
-    addAndMakeVisible(leftToggleStrip);
-    addAndMakeVisible(rightToggleStrip);
     addAndMakeVisible(leftColumn);
     addAndMakeVisible(headerBar);
     moduleIconBar.setModuleDescriptions(&moduleDescs);
@@ -436,15 +455,6 @@ MainLayout::MainLayout(ModuleDescriptions& moduleDescs)
 
 void MainLayout::applyTheme()
 {
-    midiButton.setColour(juce::TextButton::buttonColourId, AppTheme::palette().inputBackground);
-    midiButton.setColour(juce::TextButton::buttonOnColourId, AppTheme::palette().buttonActive);
-    midiButton.setColour(juce::TextButton::textColourOffId, AppTheme::palette().textSecondary);
-    libraryButton.setColour(juce::TextButton::buttonColourId, AppTheme::palette().inputBackground);
-    libraryButton.setColour(juce::TextButton::buttonOnColourId, AppTheme::palette().buttonActive);
-    libraryButton.setColour(juce::TextButton::textColourOffId, AppTheme::palette().textSecondary);
-    storeButton.setColour(juce::TextButton::buttonColourId, AppTheme::palette().inputBackground);
-    storeButton.setColour(juce::TextButton::buttonOnColourId, AppTheme::palette().buttonActive);
-    storeButton.setColour(juce::TextButton::textColourOffId, AppTheme::palette().textSecondary);
 
     moduleIconBar.applyTheme();
 
@@ -459,8 +469,6 @@ void MainLayout::applyTheme()
     diskPresetBrowserPanel.applyTheme();
     inspectorPanel.applyTheme();
     statusBar.applyTheme();
-    leftToggleStrip.repaint();
-    rightToggleStrip.repaint();
     repaint();
 }
 
@@ -478,11 +486,6 @@ void MainLayout::resized()
     if (moduleIconBarVisible)
         moduleIconBar.setBounds(area.removeFromTop(ModuleIconBar::preferredHeight));
 
-    // The chevron strips sit outside the stretchable layout, at both edges, so
-    // they keep their place whether or not the panel behind them is showing.
-    leftToggleStrip.setBounds(area.removeFromLeft(PanelToggleStrip::stripWidth));
-    rightToggleStrip.setBounds(area.removeFromRight(PanelToggleStrip::stripWidth));
-
     juce::Component* comps[] = {
         &leftColumn, &resizerBar1, &patchArea, &resizerBar2, &rightBrowserTabs
     };
@@ -491,14 +494,9 @@ void MainLayout::resized()
                                    area.getWidth(), area.getHeight(),
                                    false, true);
 
-    // Layout left column: inspector | toolbar buttons | slot bar
+    // Layout left column: inspector | slot bar
     auto leftArea = leftColumn.getLocalBounds();
-    slotBar.setBounds(leftArea.removeFromBottom(slotBarHeight));
-    auto toolRow = leftArea.removeFromBottom(toolbarHeight);
-    auto thirdW = toolRow.getWidth() / 3;
-    midiButton.setBounds(toolRow.removeFromLeft(thirdW).reduced(2));
-    libraryButton.setBounds(toolRow.removeFromLeft(thirdW).reduced(2));
-    storeButton.setBounds(toolRow.reduced(2));
+    slotBar.setBounds(leftArea.removeFromBottom(slotBar.getPreferredHeight()));
     inspectorPanel.setBounds(leftArea);
 }
 
@@ -528,7 +526,7 @@ void MainLayout::setLeftPanelVisible(bool visible)
     leftPanelVisible = visible;
     leftColumn.setVisible(visible);
     resizerBar1.setVisible(visible);
-    leftToggleStrip.setPanelOpen(visible);
+    statusBar.setPanelStates(leftPanelVisible, rightPanelVisible);
 
     // Zero out the item and its resizer so the canvas absorbs the width.
     if (visible)
@@ -556,7 +554,7 @@ void MainLayout::setRightPanelVisible(bool visible)
     rightPanelVisible = visible;
     rightBrowserTabs.setVisible(visible);
     resizerBar2.setVisible(visible);
-    rightToggleStrip.setPanelOpen(visible);
+    statusBar.setPanelStates(leftPanelVisible, rightPanelVisible);
 
     if (visible)
     {

@@ -45,12 +45,14 @@ int PatchSerializer::findModuleContainerIndex(const ModuleContainer& container, 
 
 // ---- Public API ----
 
-std::vector<std::vector<uint8_t>> PatchSerializer::serializeForUpload(const Patch& patch)
+std::vector<std::vector<uint8_t>> PatchSerializer::serializeForUpload(const Patch& patch,
+                                                                    int bankSection,
+                                                                    int bankPosition)
 {
     std::vector<std::vector<uint8_t>> sections;
     sections.reserve(16);
 
-    sections.push_back(serializePatchName(patch));           // [0]  PatchName (type 55)
+    sections.push_back(serializePatchName(patch, bankSection, bankPosition)); // [0] PatchName (type 55)
     sections.push_back(serializeHeader(patch));              // [1]  Header (type 33)
     sections.push_back(serializeModuleDump(patch, 1));       // [2]  ModuleDump poly
     sections.push_back(serializeModuleDump(patch, 0));       // [3]  ModuleDump common
@@ -102,13 +104,23 @@ std::vector<std::vector<uint8_t>> PatchSerializer::serialize(const Patch& patch)
 
 // PatchName (type 55): 0:8 0:8 0:8 String$name
 // (used in .pch file format - has 3-byte padding)
-std::vector<uint8_t> PatchSerializer::serializePatchName(const Patch& patch)
+std::vector<uint8_t> PatchSerializer::serializePatchName(const Patch& patch, int bankSection,
+                                                         int bankPosition)
 {
     BitStreamWriter bs;
     bs.writeBits(55, 8);  // section type
-    bs.writeBits(0, 8);   // padding
-    bs.writeBits(0, 8);   // padding
-    bs.writeBits(0, 8);   // padding
+    if (bankSection >= 0)
+    {
+        bs.writeBits(1, 8);                                          // destination: bank
+        bs.writeBits(static_cast<uint32_t>(bankSection & 0x7F), 8);
+        bs.writeBits(static_cast<uint32_t>(bankPosition & 0x7F), 8);
+    }
+    else
+    {
+        bs.writeBits(0, 8);   // padding (destination: working slot)
+        bs.writeBits(0, 8);   // padding
+        bs.writeBits(0, 8);   // padding
+    }
     bs.writeString16(patch.getName().toStdString());
     bs.alignToByte();
     return bs.toBytes();
@@ -131,8 +143,7 @@ std::vector<uint8_t> PatchSerializer::serializeHeaderAndName(const Patch& patch)
     bs.writeBits(h.portamento ? 1 : 0, 1);
     bs.writeBits(h.pedalMode, 1);
     bs.writeBits(h.voices - 1, 5);  // stored 0-based
-    bs.writeBits(h.unknown2, 2);
-    bs.writeBits(h.separatorPosition, 12);
+    bs.writeBits(static_cast<uint32_t>(h.separatorPosition), 14);
     bs.writeBits(h.octaveShift, 3);
     bs.writeBits(h.cableVisRed ? 1 : 0, 1);
     bs.writeBits(h.cableVisBlue ? 1 : 0, 1);
@@ -143,8 +154,9 @@ std::vector<uint8_t> PatchSerializer::serializeHeaderAndName(const Patch& patch)
     bs.writeBits(h.cableVisWhite ? 1 : 0, 1);
     bs.writeBits(h.voiceRetriggerCommon, 1);
     bs.writeBits(h.voiceRetriggerPoly, 1);
-    bs.writeBits(h.unknown3, 4);
-    bs.writeBits(h.unknown4, 3);
+    for (const auto flag : h.headerFlags)
+        bs.writeBits(flag != 0 ? 1u : 0u, 1);
+    bs.writeBits(0, 3);                    // padding
     bs.alignToByte();
 
     // PatchName2 (type 39): no 3-byte padding, just name
@@ -171,8 +183,7 @@ std::vector<uint8_t> PatchSerializer::serializeHeader(const Patch& patch)
     bs.writeBits(h.portamento ? 1 : 0, 1);
     bs.writeBits(1, 1);                    // pedalMode: Java always sends 1
     bs.writeBits(h.voices - 1, 5);        // 0-based
-    bs.writeBits(0, 2);                    // unknown2: Java always sends 0
-    bs.writeBits(h.separatorPosition, 12);
+    bs.writeBits(static_cast<uint32_t>(h.separatorPosition), 14);
     bs.writeBits(h.octaveShift, 3);
     bs.writeBits(h.cableVisRed ? 1 : 0, 1);
     bs.writeBits(h.cableVisBlue ? 1 : 0, 1);
@@ -183,8 +194,11 @@ std::vector<uint8_t> PatchSerializer::serializeHeader(const Patch& patch)
     bs.writeBits(h.cableVisWhite ? 1 : 0, 1);
     bs.writeBits(h.voiceRetriggerCommon, 1);
     bs.writeBits(h.voiceRetriggerPoly, 1);
-    bs.writeBits(0xF, 4);                  // unknown3: Java always sends 0xF
-    bs.writeBits(0, 3);                    // unknown4: Java always sends 0
+    // The four flags, as Clavia's editor sends them (all on unless a file says
+    // otherwise, which is what nmedit's constant 0xF amounted to), then padding.
+    for (const auto flag : h.headerFlags)
+        bs.writeBits(flag != 0 ? 1u : 0u, 1);
+    bs.writeBits(0, 3);
     bs.alignToByte();
 
     return bs.toBytes();
@@ -230,7 +244,7 @@ std::vector<uint8_t> PatchSerializer::serializeCableDump(const Patch& patch, int
     {
         int srcModule  = findModuleContainerIndex(container, conn.output);
         int dstModule  = findModuleContainerIndex(container, conn.input);
-        int color      = static_cast<int>(conn.output->getDescriptor()->signalType);
+        int color      = static_cast<int>(container.colourOf(conn));   // as it came, or derived (#100)
         int srcConnIdx = conn.output->getDescriptor()->index;
         int dstConnIdx = conn.input->getDescriptor()->index;
 

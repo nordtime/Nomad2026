@@ -36,17 +36,31 @@ public:
     void addListener(Listener* listener);
     void removeListener(Listener* listener);
 
-    // Enqueue a message for sending
+    // Enqueue a message for sending. A non-zero tag lets discardQueued() take
+    // it back out while it is still waiting its turn.
     void sendMessage(int cc, int slot, const std::vector<uint8_t>& payload,
-                     bool expectsReply = false, bool addChecksum = true);
+                     bool expectsReply = false, bool addChecksum = true, int tag = 0);
+
+    // Drop every queued, not yet sent message carrying this tag. The one
+    // already on the wire (if any) still gets its reply.
+    int discardQueued(int tag);
+
+    // Every frame that comes in, whole (F0 ... F7), before it is decoded: for the
+    // OS update, whose answers are not editor messages.
+    std::function<void(const uint8_t*, size_t)> onRawIncoming;
 
     // Feed incoming SysEx data (called from MIDI input handler)
     void processIncoming(const uint8_t* data, size_t length);
 
-    // Set the function used to actually send SysEx bytes out
+    // Replacing/detaching the transport discards its queue and outstanding reply.
     void setSendFunction(std::function<void(const std::vector<uint8_t>&)> fn);
 
+    // Send an already-framed message immediately, bypassing the reply queue.
+    void sendRawSysEx(const std::vector<uint8_t>& data);
+
     bool isWaitingForReply() const { return waitingForReply; }
+    // Incoming frames whose checksum byte did not match (logged, not dropped)
+    int getBadChecksumCount() const { return badChecksumCount; }
 
     static constexpr int timeoutMs = 3000;
     static constexpr int heartbeatIntervalMs = 50;
@@ -60,10 +74,12 @@ private:
     {
         std::vector<uint8_t> encoded;
         bool expectsReply = false;
+        int tag = 0;
     };
 
     std::deque<PendingMessage> sendQueue;
     bool waitingForReply = false;
+    int badChecksumCount = 0;
     juce::int64 lastSendTime = 0;
 
     std::function<void(const std::vector<uint8_t>&)> sendFn;

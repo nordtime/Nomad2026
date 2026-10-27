@@ -26,6 +26,10 @@ static void styleBtn (juce::TextButton& b)
 static void styleTextEditor (juce::TextEditor& e)
 {
     e.setReadOnly (true);
+    // A size that fills the field, and the text centred in it, both ways
+    e.setFont (juce::Font (AppTheme::uiFont (14.0f)));
+    e.setJustification (juce::Justification::centredLeft);
+    e.setIndents (12, 0);
     e.setColour (juce::TextEditor::backgroundColourId, p().inputBackground);
     e.setColour (juce::TextEditor::textColourId,       p().textSecondary);
     e.setColour (juce::TextEditor::outlineColourId,    p().borderColor);
@@ -33,6 +37,12 @@ static void styleTextEditor (juce::TextEditor& e)
 }
 
 // ─── EditorOptions persistence ───────────────────────────────────────────────
+
+const std::vector<float>& EditorOptions::uiScales()
+{
+    static const std::vector<float> scales { 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 2.5f, 3.0f };
+    return scales;
+}
 
 const std::vector<EditorOptions::SendRate>& EditorOptions::sendRates()
 {
@@ -54,6 +64,10 @@ EditorOptions EditorOptions::load(juce::PropertiesFile* props)
     // a fresh install with neither key defaults to "Nord" (index 6).
     const int legacyIndex = props->getIntValue("appearanceTheme", -1) == 1 ? 2 : 6;
     o.uiThemeIndex   = props->getIntValue("uiThemeIndex", legacyIndex);
+    o.uiThemeName    = props->getValue("uiThemeName");
+    if (const int byName = o.uiThemeName.isNotEmpty() ? ThemeRegistry::indexOfName(o.uiThemeName) : -1;
+        byName >= 0)
+        o.uiThemeIndex = byName;
     o.cableStyle     = static_cast<CableStyle>  (props->getIntValue  ("cableStyle",      0));
     // Vertical is the default: it is how the original editor behaves, and
     // what people reach for first.
@@ -61,12 +75,30 @@ EditorOptions EditorOptions::load(juce::PropertiesFile* props)
     o.autoUpload     = props->getBoolValue  ("autoUpload",     true);
     o.askSlotOnOpen  = props->getBoolValue  ("askSlotOnOpen",  true);
     o.wireframe      = props->getBoolValue  ("wireframe",      false);
+    o.hardwareLook   = props->getBoolValue  ("hardwareLook",   false);
+    o.hardwareKnobStyle = juce::jlimit (0, 2, props->getIntValue ("hardwareKnobStyle", 2));
+    o.flatKnobs      = props->getBoolValue  ("flatKnobs",      false);
+    // "wireframe,hardwareLook,knobStyle,flatKnobs" as 0/1/0-2/0/1; empty when no theme sets one.
+    if (const auto t = juce::StringArray::fromTokens (props->getValue ("renderBeforeTheme"), ",", {});
+        t.size() == 4)
+        o.renderBeforeTheme = RenderStyle { t[0].getIntValue() != 0, t[1].getIntValue() != 0,
+                                            juce::jlimit (0, 2, t[2].getIntValue()), t[3].getIntValue() != 0 };
     o.animateTiling  = props->getBoolValue  ("animateTiling",  true);
+    o.restoreAllWindows = props->getBoolValue ("restoreAllWindows", false);
     o.synthDisplayCaptions = props->getBoolValue ("synthDisplayCaptions", false);
+    o.seqNoteNames   = props->getBoolValue  ("seqNoteNames",   false);
+    o.checkCommunityThemes   = props->getBoolValue ("checkCommunityThemes", true);
+    o.communityThemesChecked = props->getValue ("communityThemesChecked", "0").getLargeIntValue();
+    o.communityThemesSeen    = props->getValue ("communityThemesSeen");
+    o.checkNewVersion        = props->getBoolValue ("checkNewVersion", true);
+    o.newVersionChecked      = props->getValue ("newVersionChecked", "0").getLargeIntValue();
+    o.latestVersion          = props->getValue ("latestVersion");
+    o.newVersionSeen         = props->getValue ("newVersionSeen");
     o.moduleIconBar  = props->getBoolValue  ("moduleIconBar",  true);
     o.moduleIconBarCategory = props->getValue ("moduleIconBarCategory", "In/Out");
     o.mcpBridgeEnabled = props->getBoolValue("mcpBridgeEnabled", false);
     o.cableOpacity   = static_cast<float>   (props->getDoubleValue("cableOpacity", 0.80));
+    o.uiScale        = juce::jlimit (1.0f, 3.0f, static_cast<float> (props->getDoubleValue ("uiScale", 1.0)));
     o.sendRateIndex  = juce::jlimit (0, static_cast<int> (sendRates().size()) - 1,
                                      props->getIntValue ("sendRateIndex", 1));
     auto libraryPath = props->getValue ("presetLibraryRoot", {});
@@ -79,18 +111,38 @@ void EditorOptions::save(juce::PropertiesFile* props) const
 {
     if (!props) return;
     props->setValue ("uiThemeIndex",    uiThemeIndex);
+    props->setValue ("uiThemeName",     ThemeRegistry::get (uiThemeIndex).name);
     props->setValue ("cableStyle",      static_cast<int> (cableStyle));
     props->setValue ("knobControl",     static_cast<int> (knobControl));
     props->setValue ("autoUpload",      autoUpload);
     props->setValue ("askSlotOnOpen",   askSlotOnOpen);
     props->setValue ("wireframe",       wireframe);
+    props->setValue ("hardwareLook",    hardwareLook);
+    props->setValue ("hardwareKnobStyle", hardwareKnobStyle);
+    props->setValue ("flatKnobs",       flatKnobs);
+    props->setValue ("renderBeforeTheme",
+                     renderBeforeTheme ? juce::String (int (renderBeforeTheme->wireframe)) + ","
+                                             + juce::String (int (renderBeforeTheme->hardwareLook)) + ","
+                                             + juce::String (renderBeforeTheme->knobStyle) + ","
+                                             + juce::String (int (renderBeforeTheme->flatKnobs))
+                                       : juce::String());
     props->setValue ("animateTiling",   animateTiling);
+    props->setValue ("restoreAllWindows", restoreAllWindows);
     props->setValue ("synthDisplayCaptions", synthDisplayCaptions);
+    props->setValue ("seqNoteNames",    seqNoteNames);
+    props->setValue ("checkCommunityThemes",   checkCommunityThemes);
+    props->setValue ("communityThemesChecked", juce::String (communityThemesChecked));
+    props->setValue ("communityThemesSeen",    communityThemesSeen);
+    props->setValue ("checkNewVersion",        checkNewVersion);
+    props->setValue ("newVersionChecked",      juce::String (newVersionChecked));
+    props->setValue ("latestVersion",          latestVersion);
+    props->setValue ("newVersionSeen",         newVersionSeen);
     props->setValue ("moduleIconBar",   moduleIconBar);
     props->setValue ("moduleIconBarCategory", moduleIconBarCategory);
     props->setValue ("mcpBridgeEnabled", mcpBridgeEnabled);
     props->setValue ("cableOpacity",    static_cast<double>(cableOpacity));
     props->setValue ("sendRateIndex",   sendRateIndex);
+    props->setValue ("uiScale",         static_cast<double> (uiScale));
     props->setValue ("presetLibraryRoot", presetLibraryRoot.getFullPathName());
     props->saveIfNeeded();
 }
@@ -110,6 +162,12 @@ juce::File EditorOptions::getBanksFolder() const
     return presetLibraryRoot == juce::File() ? juce::File() : presetLibraryRoot.getChildFile ("Banks");
 }
 
+// Slot sets: one folder per set, holding its patches and a .nmset manifest.
+juce::File EditorOptions::getSetsFolder() const
+{
+    return presetLibraryRoot == juce::File() ? juce::File() : presetLibraryRoot.getChildFile ("Sets");
+}
+
 // Module presets ("<Type>.pchp" packs) sit alongside patches, snippets and
 // banks so a preset library is shared the same way everything else is.
 juce::File EditorOptions::getPresetsFolder() const
@@ -127,7 +185,8 @@ bool EditorOptions::ensureLibraryFolders() const
     auto snippetsOk = getSnippetsFolder().createDirectory().wasOk();
     auto banksOk = getBanksFolder().createDirectory().wasOk();
     auto presetsOk = getPresetsFolder().createDirectory().wasOk();
-    return rootOk && patchesOk && snippetsOk && banksOk && presetsOk;
+    auto setsOk = getSetsFolder().createDirectory().wasOk();
+    return rootOk && patchesOk && snippetsOk && banksOk && presetsOk && setsOk;
 }
 
 // ─── EditorOptionsDialog ─────────────────────────────────────────────────────
@@ -149,8 +208,62 @@ EditorOptionsDialog::EditorOptionsDialog(const EditorOptions& current,
     styleLabel (themeLabel);
     populateThemeSelector();
     addAndMakeVisible (appearanceLabel);
+
+    // Hardware look + knob style
+    styleToggle (hardwareLookToggle);
+    hardwareLookToggle.setToggleState (options.hardwareLook, juce::dontSendNotification);
+    hardwareLookToggle.setTooltip ("Draws knobs, jacks, module panels, displays and cables as "
+                                   "physical hardware. Works with any theme.");
+    hardwareLookToggle.onClick = [this]() {
+        knobStyleSelector.setEnabled (hardwareLookToggle.getToggleState());
+        flatKnobsToggle.setEnabled (! hardwareLookToggle.getToggleState());
+    };
+    addAndMakeVisible (hardwareLookToggle);
+
+    styleLabel (knobStyleLabel);
+    knobStyleSelector.addItem ("Domed cap",       1);
+    knobStyleSelector.addItem ("Black knurled",      2);
+    knobStyleSelector.addItem ("Aluminium knurled",  3);
+    knobStyleSelector.setSelectedId (options.hardwareKnobStyle + 1, juce::dontSendNotification);
+    knobStyleSelector.setEnabled (options.hardwareLook);
+    knobStyleSelector.setColour (juce::ComboBox::backgroundColourId, p().inputBackground);
+    knobStyleSelector.setColour (juce::ComboBox::outlineColourId,    p().borderColor);
+    knobStyleSelector.setColour (juce::ComboBox::textColourId,       p().textSecondary);
+    knobStyleSelector.setColour (juce::ComboBox::arrowColourId,      p().textSecondary);
+    addAndMakeVisible (knobStyleLabel);
+    addAndMakeVisible (knobStyleSelector);
+
+    styleToggle (flatKnobsToggle);
+    flatKnobsToggle.setToggleState (options.flatKnobs, juce::dontSendNotification);
+    flatKnobsToggle.setEnabled (! options.hardwareLook);
+    flatKnobsToggle.setTooltip ("Knobs drawn like the ones on the Animatek modules for VCV Rack: "
+                                "a dark disc with a thin rim, a white pointer and the value "
+                                "painted in blue on the rim. Works with any theme.");
+    addAndMakeVisible (flatKnobsToggle);
     addAndMakeVisible (themeLabel);
     addAndMakeVisible (themeSelector);
+
+    // Interface size: the whole UI, for 4K screens where the text is too small to read.
+    styleLabel (uiScaleLabel);
+    {
+        const auto& scales = EditorOptions::uiScales();
+        int selected = 1;
+        for (int i = 0; i < static_cast<int> (scales.size()); ++i)
+        {
+            uiScaleSelector.addItem (juce::String (juce::roundToInt (scales[static_cast<size_t> (i)] * 100.0f)) + "%", i + 1);
+            if (std::abs (scales[static_cast<size_t> (i)] - options.uiScale) < 0.01f)
+                selected = i + 1;
+        }
+        uiScaleSelector.setSelectedId (selected, juce::dontSendNotification);
+    }
+    uiScaleSelector.setColour (juce::ComboBox::backgroundColourId, p().inputBackground);
+    uiScaleSelector.setColour (juce::ComboBox::outlineColourId,    p().borderColor);
+    uiScaleSelector.setColour (juce::ComboBox::textColourId,       p().textSecondary);
+    uiScaleSelector.setColour (juce::ComboBox::arrowColourId,      p().textSecondary);
+    uiScaleSelector.setTooltip ("Makes every window, menu and text bigger, for 4K screens. "
+                                "Applies when you press OK; windows grow with it.");
+    addAndMakeVisible (uiScaleLabel);
+    addAndMakeVisible (uiScaleSelector);
 
     // Cable Style (radio group 1)
     styleLabel (cableStyleLabel, true);
@@ -210,19 +323,40 @@ EditorOptionsDialog::EditorOptionsDialog(const EditorOptions& current,
     styleToggle (autoUploadToggle);
     styleToggle (wireframeToggle);
     styleToggle (animateTilingToggle);
+    styleToggle (restoreWindowsToggle);
     styleToggle (synthCaptionToggle);
     styleToggle (askSlotToggle);
+    styleToggle (seqNoteNamesToggle);
+    styleToggle (communityThemesToggle);
+    communityThemesToggle.setToggleState (options.checkCommunityThemes, juce::dontSendNotification);
+    communityThemesToggle.setTooltip ("On startup, at most once a day, NME reads the list of themes in "
+                                      "github.com/animatek/nme-themes and marks the new ones in View > Themes. "
+                                      "Nothing is sent but the request. Off: only when you choose Check Now.");
+    addAndMakeVisible (communityThemesToggle);
+    styleToggle (newVersionToggle);
+    newVersionToggle.setToggleState (options.checkNewVersion, juce::dontSendNotification);
+    newVersionToggle.setTooltip ("On startup, at most once a day, NME reads the release tags of "
+                                 "github.com/animatek/Animatek-NME. When a newer version is out, About "
+                                 "gets a red dot and an item that opens Patreon. It never downloads anything.");
+    addAndMakeVisible (newVersionToggle);
     autoUploadToggle.setToggleState (options.autoUpload,     juce::dontSendNotification);
     askSlotToggle   .setToggleState (options.askSlotOnOpen,  juce::dontSendNotification);
     wireframeToggle .setToggleState (options.wireframe,      juce::dontSendNotification);
     animateTilingToggle.setToggleState (options.animateTiling, juce::dontSendNotification);
+    restoreWindowsToggle.setToggleState (options.restoreAllWindows, juce::dontSendNotification);
+    restoreWindowsToggle.setTooltip ("Off: on startup only Port 1's slot windows come back, and another synth's "
+                                     "windows open when it connects and close when it goes. On: every window "
+                                     "left open last time comes back, and they stay open.");
     synthCaptionToggle.setToggleState (options.synthDisplayCaptions, juce::dontSendNotification);
+    seqNoteNamesToggle.setToggleState (options.seqNoteNames, juce::dontSendNotification);
     addAndMakeVisible (behaviourLabel);
     addAndMakeVisible (autoUploadToggle);
     addAndMakeVisible (wireframeToggle);
     addAndMakeVisible (animateTilingToggle);
+    addAndMakeVisible (restoreWindowsToggle);
     addAndMakeVisible (synthCaptionToggle);
     addAndMakeVisible (askSlotToggle);
+    addAndMakeVisible (seqNoteNamesToggle);
 
     // Send speed selector — synth parameter throughput (Mutator/Random)
     styleLabel (sendRateLabel);
@@ -280,7 +414,7 @@ EditorOptionsDialog::EditorOptionsDialog(const EditorOptions& current,
     styleLabel (libraryLabel, true);
     styleTextEditor (libraryPath);
     libraryPath.setText (options.presetLibraryRoot.getFullPathName(), juce::dontSendNotification);
-    libraryPath.setTextToShowWhenEmpty ("Choose a root folder. Animatek NME will create Patches and Snippets inside it.", p().textMuted);
+    libraryPath.setTextToShowWhenEmpty ("Choose a root folder. Every .pch under it shows in the Disk tab.", p().textMuted);
     styleBtn (browseLibraryButton);
     browseLibraryButton.onClick = [this]() { browseLibraryRoot(); };
     addAndMakeVisible (libraryLabel);
@@ -296,6 +430,7 @@ EditorOptionsDialog::EditorOptionsDialog(const EditorOptions& current,
     addAndMakeVisible (cancelButton);
 
     setSize (dialogWidth, layoutComponents (false));
+    showPage (0);
 }
 
 void EditorOptionsDialog::populateThemeSelector()
@@ -314,23 +449,64 @@ void EditorOptionsDialog::populateThemeSelector()
 
 void EditorOptionsDialog::paint (juce::Graphics& g)
 {
-    g.fillAll (p().backgroundMain);
+    const auto& pal = p();
+    g.fillAll (pal.backgroundMain);
 
-    g.setColour (p().textPrimary);
-    g.setFont (juce::Font (AppTheme::uiFont (14.0f)).boldened());
-    g.drawText ("Editor Options", 10, 0, getWidth() - 44, 32, juce::Justification::centredLeft);
+    // Title bar
+    g.setColour (pal.textPrimary);
+    g.setFont (juce::Font (AppTheme::uiFont (15.0f)).boldened());
+    g.drawText ("Editor Options", 18, 0, getWidth() - 60, titleBarH, juce::Justification::centredLeft);
+    g.setColour (pal.borderColor);
+    g.fillRect (0, titleBarH - 1, getWidth(), 1);
 
-    g.setColour (p().buttonActive);
-    g.fillRect (0, 31, getWidth(), 1);
+    // Sidebar
+    g.setColour (pal.backgroundPanel);
+    g.fillRect (0, titleBarH, sidebarW, getHeight() - titleBarH);
+    g.setColour (pal.borderColor);
+    g.fillRect (sidebarW - 1, titleBarH, 1, getHeight() - titleBarH);
+    for (int i = 0; i < numPages; ++i)
+    {
+        const auto r = pageButtonBounds (i).toFloat();
+        const bool on = (i == page);
+        if (on)
+        {
+            g.setColour (pal.buttonBackground);
+            g.fillRoundedRectangle (r, 7.0f);
+            g.setColour (pal.accentActive);
+            g.fillRoundedRectangle (r.getX(), r.getY() + 8.0f, 3.0f, r.getHeight() - 16.0f, 1.5f);
+        }
+        g.setColour (on ? pal.textPrimary : pal.textSecondary);
+        g.setFont (juce::Font (AppTheme::uiFont (14.0f).withStyle (on ? "Bold" : "Regular")));
+        g.drawText (pageName (i), r.toNearestInt().withTrimmedLeft (18), juce::Justification::centredLeft, false);
+    }
 
-    // Separators are computed by layoutComponents() (the same pass that
-    // places every component), never hand-copied here - so a line can never
-    // drift out of sync with what resized() actually did.
-    const float x0 = 14.0f, x1 = static_cast<float> (getWidth() - 14);
-    g.setColour (p().buttonActive);
-    for (int sy : sectionSeparatorsY)
-        g.drawHorizontalLine (sy, x0, x1);
+    // The page: its name, and the rows that are a name and a control
+    const int x0 = sidebarW + 32;
+    g.setColour (pal.textPrimary);
+    g.setFont (juce::Font (AppTheme::uiFont (20.0f)).boldened());
+    g.drawText (pageName (page), x0, titleBarH + 16, 400, 36, juce::Justification::centredLeft);
+
+    for (const auto& row : infoRows)
+    {
+        if (row.page != page)
+            continue;
+        const int textW = row.rect.getWidth() - row.controlW - 28;
+        g.setColour (pal.borderColor.withAlpha (0.5f));
+        g.fillRect (row.rect.getX(), row.rect.getBottom() - 1, row.rect.getWidth(), 1);
+        g.setColour (pal.textPrimary);
+        g.setFont (juce::Font (AppTheme::uiFont (14.0f)).boldened());
+        g.drawText (row.title, row.rect.getX(), row.rect.getY() + 12, textW, 22, juce::Justification::centredLeft, true);
+        g.setColour (pal.textMuted);
+        g.setFont (juce::Font (AppTheme::uiFont (12.5f)));
+        g.drawFittedText (row.description, row.rect.getX(), row.rect.getY() + 35, textW, row.rect.getHeight() - 42,
+                          juce::Justification::topLeft, 2, 1.0f);
+    }
+
+    // Footer
+    g.setColour (pal.borderColor);
+    g.fillRect (sidebarW, getHeight() - footerH, getWidth() - sidebarW, 1);
 }
+
 
 // ─── resized ─────────────────────────────────────────────────────────────────
 
@@ -339,110 +515,125 @@ void EditorOptionsDialog::resized()
     layoutComponents (true);
 }
 
+const char* EditorOptionsDialog::pageName (int page)
+{
+    static const char* const names[numPages] = { "Appearance", "Cables", "Knobs", "Behaviour",
+                                                 "Synth link", "Library", "Updates", "Advanced" };
+    return names[juce::jlimit (0, numPages - 1, page)];
+}
+
+juce::Rectangle<int> EditorOptionsDialog::pageButtonBounds (int index) const
+{
+    return { 8, titleBarH + 14 + index * 42, sidebarW - 16, 38 };
+}
+
+// Only the controls of the page that is showing are on screen; every page is laid out all the
+// same, so the dialog does not change size and nothing jumps when one is picked.
+void EditorOptionsDialog::showPage (int newPage)
+{
+    page = juce::jlimit (0, numPages - 1, newPage);
+    auto only = [this] (std::initializer_list<juce::Component*> controls, int forPage)
+    {
+        for (auto* c : controls)
+            c->setVisible (page == forPage);
+    };
+    only ({ &themeSelector, &uiScaleSelector, &hardwareLookToggle, &knobStyleSelector, &flatKnobsToggle, &wireframeToggle }, 0);
+    only ({ &cableCurvedThick, &cableStraightThick, &cableCurvedThin, &cableStraightThin, &cableOpacitySlider }, 1);
+    only ({ &knobHorizontal, &knobCircular, &knobVertical }, 2);
+    only ({ &askSlotToggle, &animateTilingToggle, &restoreWindowsToggle, &seqNoteNamesToggle }, 3);
+    only ({ &autoUploadToggle, &synthCaptionToggle, &sendRateSelector }, 4);
+    only ({ &libraryPath, &browseLibraryButton }, 5);
+    only ({ &communityThemesToggle, &newVersionToggle }, 6);
+    only ({ &mcpBridgeToggle, &mcpBridgeStatusLabel, &mcpBridgeCommand, &mcpBridgeCopyButton }, 7);
+
+    // The old section and row labels are drawn by paint() now
+    for (auto* l : { &appearanceLabel, &themeLabel, &uiScaleLabel, &knobStyleLabel, &cableStyleLabel,
+                     &cableOpacityLabel, &knobControlLabel, &behaviourLabel, &sendRateLabel,
+                     &mcpBridgeLabel, &libraryLabel })
+        l->setVisible (false);
+
+    repaint();
+}
+
 int EditorOptionsDialog::layoutComponents (bool apply)
 {
-    constexpr int pad   = 14;
-    constexpr int rowH  = 22;
-    constexpr int secH  = 16;
-    constexpr int secGap = 8;   // padding before/after a section label
-    constexpr int sepGap = 8;   // padding before a separator line
-    const int w = dialogWidth;
+    const int w = dialogWidth, h = dialogHeight;
+    const int x0 = sidebarW + 32;
+    const int cw = w - x0 - 32;                  // width of a page's rows
+    const int top = titleBarH + 70;              // under the page's name
+    constexpr int rowD = 74;                     // a row with a name and a line saying what it does
+    constexpr int rowS = 48;                     // a row with just a name
 
-    sectionSeparatorsY.clear();
-    auto place = [apply] (juce::Component& c, int x, int y, int cw, int ch) {
-        if (apply) c.setBounds (x, y, cw, ch);
+    infoRows.clear();
+    auto place = [apply] (juce::Component& c, juce::Rectangle<int> r) { if (apply) c.setBounds (r); };
+
+    if (apply) closeButton.setBounds (w - 36, 6, 28, 28);
+
+    // A switch or radio row is the whole row
+    auto option = [&] (OptionRow& o, int y, int rowH) { place (o, { x0, y, cw, rowH }); return y + rowH; };
+    // A row of text on the left and a control on the right
+    auto info = [&] (int pg, const juce::String& title, const juce::String& description, int y, int rowH,
+                     juce::Component& control, int controlW, int controlH)
+    {
+        const juce::Rectangle<int> r (x0, y, cw, rowH);
+        infoRows.push_back ({ pg, r, title, description, controlW });
+        place (control, { r.getRight() - controlW, r.getCentreY() - controlH / 2, controlW, controlH });
+        return y + rowH;
     };
-    // Marks a section boundary: adds the gap, records where the divider
-    // line goes, and returns the (possibly updated) y - call right before
-    // laying out each section's header label (except the very first one).
-    auto sectionSep = [this, &sepGap] (int yIn) {
-        int y = yIn + sepGap;
-        sectionSeparatorsY.push_back (y);
-        return y + 4;
-    };
 
-    if (apply) closeButton.setBounds (w - 32, 2, 28, 28);
+    int y = top;   // Appearance
+    y = info (0, "Theme", "Colours of the editor and the modules.", y, rowD, themeSelector, 230, 34);
+    y = info (0, "UI size", "Makes every window, menu and text bigger, for 4K screens. Applies when you press OK.", y, rowD, uiScaleSelector, 140, 34);
+    y = option (hardwareLookToggle, y, rowD);
+    y = info (0, "Knob style", "Used by the hardware look.", y, rowD, knobStyleSelector, 210, 34);
+    y = option (flatKnobsToggle, y, rowD);
+    y = option (wireframeToggle, y, rowD);
 
-    int y = 32 + secGap;  // below title bar
-
-    // ── Appearance ───────────────────────────────────────────
-    place (appearanceLabel, pad, y, w - pad * 2, secH);
-    y += secH + 6;
-    place (themeLabel,    pad + 8,  y, 80, rowH);
-    place (themeSelector, pad + 92, y, w - pad * 2 - 100, rowH);
-    y += rowH + secGap;
-
-    // ── Cable Style ──────────────────────────────────────────
-    y = sectionSep (y);
-    place (cableStyleLabel, pad, y, w - pad * 2, secH);
-    y += secH + 2;
+    y = top;       // Cables
     for (auto* b : { &cableCurvedThick, &cableStraightThick, &cableCurvedThin, &cableStraightThin })
-    {
-        place (*b, pad + 8, y, w - pad * 2 - 8, rowH);
-        y += rowH;
-    }
-    y += 4;
-    place (cableOpacityLabel,  pad + 8,  y, 80, rowH);
-    place (cableOpacitySlider, pad + 92, y, w - pad * 2 - 100, rowH);
-    y += rowH + secGap;
+        y = option (*b, y, rowS);
+    y = info (1, "Opacity", "How solid the cables are. The canvas follows the slider; Cancel puts it back.", y + 10, rowD,
+              cableOpacitySlider, 280, 28);
 
-    // ── Knob Control ─────────────────────────────────────────
-    y = sectionSep (y);
-    place (knobControlLabel, pad, y, w - pad * 2, secH);
-    y += secH + 2;
+    y = top;       // Knobs
     for (auto* b : { &knobHorizontal, &knobCircular, &knobVertical })
-    {
-        place (*b, pad + 8, y, w - pad * 2 - 8, rowH);
-        y += rowH;
-    }
-    y += secGap;
+        y = option (*b, y, rowD);
 
-    // ── Behaviour ────────────────────────────────────────────
-    y = sectionSep (y);
-    place (behaviourLabel, pad, y, w - pad * 2, secH);
-    y += secH + 2;
-    place (autoUploadToggle, pad + 8, y, w - pad * 2 - 8, rowH);
-    y += rowH;
-    place (wireframeToggle, pad + 8, y, w - pad * 2 - 8, rowH);
-    y += rowH;
-    place (animateTilingToggle, pad + 8, y, w - pad * 2 - 8, rowH);
-    y += rowH;
-    place (askSlotToggle, pad + 8, y, w - pad * 2 - 8, rowH);
-    y += rowH;
-    place (synthCaptionToggle, pad + 8, y, w - pad * 2 - 8, rowH);
-    y += rowH + 4;
-    place (sendRateLabel,    pad + 8,  y, 80, rowH);
-    place (sendRateSelector, pad + 92, y, w - pad * 2 - 100, rowH);
-    y += rowH + 12;
+    y = top;       // Behaviour
+    y = option (askSlotToggle, y, rowD);
+    y = option (animateTilingToggle, y, rowD);
+    y = option (restoreWindowsToggle, y, rowD);
+    y = option (seqNoteNamesToggle, y, rowD);
 
-    // ── MCP Bridge ────────────────────────────────────────────
-    y = sectionSep (y);
-    place (mcpBridgeLabel, pad, y, w - pad * 2, secH);
-    y += secH + 2;
-    place (mcpBridgeToggle, pad + 8, y, w - pad * 2 - 8, rowH);
-    y += rowH;
-    place (mcpBridgeStatusLabel, pad + 8, y, w - pad * 2 - 8, rowH);
-    y += rowH + 6;
-    place (mcpBridgeCopyButton, w - pad - 72, y, 72, 26);
-    place (mcpBridgeCommand,    pad + 8, y, w - pad * 2 - 8 - 72 - 8, 26);
-    y += 26 + secGap;
+    y = top;       // Synth link
+    y = option (autoUploadToggle, y, rowD);
+    y = option (synthCaptionToggle, y, rowD);
+    y = info (4, "Send speed", "How fast parameter changes are streamed to the synth. Lower it if the connection drops.", y, rowD,
+              sendRateSelector, 230, 34);
 
-    // ── Preset Library ───────────────────────────────────────
-    y = sectionSep (y);
-    place (libraryLabel, pad, y, w - pad * 2, secH);
-    y += secH + 2;
-    place (browseLibraryButton, w - pad - 92, y, 92, 26);
-    place (libraryPath,         pad + 8, y, w - pad * 2 - 8 - 92 - 8, 26);
-    y += 26 + 12;
+    y = top;       // Library
+    y = info (5, "Preset library", "Every .pch under this folder shows in the Disk tab. Snippets, banks and sets get their own folders in it.",
+              y, rowD, browseLibraryButton, 120, 34);
+    place (libraryPath, { x0, y + 4, cw, 38 });
 
-    // ── OK / Cancel ──────────────────────────────────────────
-    y += 10;
-    const int btnW = 80, btnH = 26;
-    place (cancelButton, w - pad - btnW,         y, btnW, btnH);
-    place (okButton,     w - pad - btnW * 2 - 8, y, btnW, btnH);
-    y += btnH;
+    y = top;       // Updates
+    y = option (communityThemesToggle, y, rowD);
+    y = option (newVersionToggle, y, rowD);
 
-    return y + pad;
+    y = top;       // Advanced
+    y = option (mcpBridgeToggle, y, rowD);
+    place (mcpBridgeStatusLabel, { x0, y + 2, cw, 24 });
+    y += 36;
+    y = info (7, "Command for your MCP client", "Register this in Claude Code, Claude Desktop or any client that speaks MCP.", y, rowD,
+              mcpBridgeCopyButton, 100, 34);
+    place (mcpBridgeCommand, { x0, y + 2, cw, 38 });
+
+    // OK and Cancel, at the right of the footer
+    const int by = h - footerH + (footerH - 36) / 2;
+    place (cancelButton, { w - 32 - 100, by, 100, 36 });
+    place (okButton,     { w - 32 - 100 - 12 - 100, by, 100, 36 });
+
+    return h;
 }
 
 // ─── interaction ─────────────────────────────────────────────────────────────
@@ -455,9 +646,30 @@ bool EditorOptionsDialog::keyPressed (const juce::KeyPress& key)
 }
 
 void EditorOptionsDialog::mouseDown (const juce::MouseEvent& e)
-    { if (e.getPosition().getY() < 32) dragger.startDraggingComponent (this, e); }
+{
+    for (int i = 0; i < numPages; ++i)
+        if (pageButtonBounds (i).contains (e.getPosition()))
+        {
+            showPage (i);
+            return;
+        }
+
+    // Only a press on the title bar drags the window; any other press must not, or the next
+    // little movement of the mouse would carry the window off by where the last drag started
+    draggingWindow = e.getPosition().getY() < titleBarH;
+    if (draggingWindow)
+        dragger.startDraggingComponent (this, e);
+}
+
+void EditorOptionsDialog::mouseUp (const juce::MouseEvent&)
+{
+    draggingWindow = false;
+}
 void EditorOptionsDialog::mouseDrag (const juce::MouseEvent& e)
-    { dragger.dragComponent (this, e, nullptr); }
+{
+    if (draggingWindow)
+        dragger.dragComponent (this, e, nullptr);
+}
 
 void EditorOptionsDialog::close()
 {
@@ -507,11 +719,21 @@ void EditorOptionsDialog::apply()
     if (knobVertical  .getToggleState()) options.knobControl = EditorOptions::KnobControl::Vertical;
 
     options.uiThemeIndex   = themeSelector.getSelectedId() - 1;
+    options.uiScale        = EditorOptions::uiScales()[static_cast<size_t> (juce::jlimit (
+                                 0, static_cast<int> (EditorOptions::uiScales().size()) - 1,
+                                 uiScaleSelector.getSelectedId() - 1))];
     options.autoUpload     = autoUploadToggle.getToggleState();
     options.wireframe      = wireframeToggle  .getToggleState();
+    options.hardwareLook   = hardwareLookToggle.getToggleState();
+    options.hardwareKnobStyle = juce::jmax (0, knobStyleSelector.getSelectedId() - 1);
+    options.flatKnobs      = flatKnobsToggle.getToggleState();
     options.animateTiling  = animateTilingToggle.getToggleState();
+    options.restoreAllWindows = restoreWindowsToggle.getToggleState();
     options.askSlotOnOpen  = askSlotToggle.getToggleState();
     options.synthDisplayCaptions = synthCaptionToggle.getToggleState();
+    options.seqNoteNames   = seqNoteNamesToggle.getToggleState();
+    options.checkCommunityThemes = communityThemesToggle.getToggleState();
+    options.checkNewVersion = newVersionToggle.getToggleState();
     options.sendRateIndex  = sendRateSelector.getSelectedId() - 1;
     options.mcpBridgeEnabled = mcpBridgeToggle.getToggleState();
     options.cableOpacity   = static_cast<float> (cableOpacitySlider.getValue()) * 0.01f;

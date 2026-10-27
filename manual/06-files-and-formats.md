@@ -6,10 +6,17 @@ Patches are standard Nord Modular **3.0 text format** `.pch` files, compatible
 with the original Clavia editor and Nomad/nmedit. Anything you save in Animatek
 NME loads in the originals and vice versa.
 
-- **Legacy 2.10 patches** (the older `[Module N]` format) load transparently,
-  including daisy-chained cables and correct 1/2 output routing. They are tagged
-  **PCH2** in the preset browser, and the browser's **PCH2** filter toggle hides
-  them when you only want current patches. Saving rewrites them in 3.0 format.
+- **Legacy 2.10 patches** (the older `[Module N]` format, from Clavia's editor
+  2.x; many factory patches are 2.10) are converted as Clavia's editor 3.03
+  converts them: the selectors whose 0 meant "off" become a selector plus a mute
+  or bypass, the oscillators' inverted on/off becomes 3.0's mute, sequencer
+  steps are unpacked, and the old morph module, morph assignments, knobs, MIDI
+  controllers and notes carry over. They are tagged **PCH2** in the preset
+  browser, and the browser's **PCH2** filter toggle hides them when you only
+  want current patches. Saving rewrites them in 3.0 format. A converted patch
+  can still differ from what its author heard: if one is silent, check its
+  outputs, its audio inputs and whether it waits for the MIDI clock or a knob
+  (its notes often say).
 - **Patch notes** are stored in a `[Notes]` section, a Nomad/nmedit extension
   that original editors ignore harmlessly.
 - **Comments** (the text notes on the canvas) are stored the same way, in a
@@ -91,13 +98,43 @@ The disk browser scans a configurable **preset library** folder recursively:
   Snippets/   exported snippets
   Presets/    one .pchp pack of module presets per module type
   Banks/      Bank1 … Bank9 mirror folders from "Backup All Banks"
+  Sets/       slot sets: one folder per set, its patches and a .nmset manifest
 ```
 
-Search covers filenames; filters narrow to patches, snippets or bank backups.
-Bank backups load like any other patch.
+Search covers filenames; filters narrow to patches, snippets, bank backups or
+slot sets. Bank backups load like any other patch; a slot set loads into all
+the slots it names (see *Slot sets* in chapter 4).
+
+## `.nmset` slot set manifest
+
+JSON, in the set's folder next to its patch copies:
+
+```json
+{
+  "format": "animatek-nme-slot-set",
+  "version": 1,
+  "name": "Fractura",
+  "notes": "Start with A and C.",
+  "focus": "A",
+  "slots": {
+    "A": { "mode": "patch", "file": "A Nucleo Duro.pch",
+           "patchName": "A Nucleo Duro", "enabled": true, "bank": 414 },
+    "B": { "mode": "disable" },
+    "C": { "mode": "keep" }
+  }
+}
+```
+
+`mode` is `patch`, `disable` or `keep`, and a slot left out is kept. `file` must
+be a `.pch` in the same folder: a manifest naming anything else, an unknown
+mode or a newer `version` is refused rather than half loaded. `bank` is
+informational.
 
 ## Bank folders
 
-**Save Bank to Disk** writes patches as `NN - Name.pch`; the `NN` prefix
-records the bank position, and **Send Bank to Synth** uses it to restore
-patches to their exact slots.
+**Save Bank to Disk** writes patches as `NN - Name.pch` and a
+`BankN.pchList` beside them: the list Clavia's editor writes, plain text with
+one file per line in bank order, where a number line (`10`) jumps to that
+position. **Send Bank to Synth** takes the list (NME's or Clavia's) and puts
+every patch back at its position. A folder without a list goes by the `NN`
+prefix when every file has one, and otherwise in name order from position 1.

@@ -2,12 +2,31 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+// A button at the foot of the window, the way Bitwig keeps its own: an "i" for the inspector, a
+// magnifying glass for the browser (both lit in the accent while their panel is open), a little
+// keyboard for MIDI Setup and a cogwheel for the editor's options.
+class PanelIconButton : public juce::Button
+{
+public:
+    enum class Icon { Inspector, Browser, Midi, Settings };
+    explicit PanelIconButton(Icon i);
+    void paintButton(juce::Graphics& g, bool highlighted, bool down) override;
+private:
+    Icon icon;
+};
+
 class StatusBar : public juce::Component
 {
 public:
     StatusBar();
 
+    // The inspector and browser switches; setPanelStates lights them to match the panels
+    std::function<void()> onInspectorClicked, onBrowserClicked, onMidiClicked, onSettingsClicked;
+    void setPanelStates(bool inspectorOpen, bool browserOpen);
+
     void setConnectionStatus(const juce::String& status, bool connected = false);
+    // Where the editor is connected: "Real G1 (port)", "G1-Emu (port)", "Not connected".
+    void setSynthLink(const juce::String& text);
     void setVoiceCount(int count);
     void setDspLoad(float percent);
     void showMessage(const juce::String& message, int durationMs = 3000);
@@ -29,13 +48,19 @@ public:
     void mouseDown(const juce::MouseEvent& e) override;
 
 private:
+    PanelIconButton inspectorButton { PanelIconButton::Icon::Inspector };
+    PanelIconButton browserButton   { PanelIconButton::Icon::Browser };
+    PanelIconButton midiButton      { PanelIconButton::Icon::Midi };
+    PanelIconButton settingsButton  { PanelIconButton::Icon::Settings };
     juce::Label connectionLabel;
+    juce::Label linkLabel;
     juce::Label voiceLabel;
     juce::Label dspLabel;
     juce::Label messageLabel;  // Temporary status messages
 
     bool isConnected = false;
     juce::Rectangle<float> ledBounds;
+    int sepLeftX = -1, sepRightX = -1;   // x of the two hairlines between the buttons and the text
 
     bool progressVisible = false;
     double progressFraction = 0.0;

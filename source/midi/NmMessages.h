@@ -19,6 +19,16 @@ namespace NmCmd
     constexpr uint8_t PatchPacketBase = 0x1c;
 }
 
+// The device byte of a synth's IAm: which Nord Modular answered (docs/RESEARCH.md, "Device
+// Identification"). The Micro has one slot and one DSP, no 18 knobs.
+enum class SynthModel
+{
+    Unknown  = -1,
+    Keyboard = 0,
+    Rack     = 1,
+    Micro    = 2
+};
+
 struct IAmMessage
 {
     int sender = 0;       // 0 = PC, 1 = Synth
@@ -26,6 +36,18 @@ struct IAmMessage
     int versionLow = 3;
     int serial = -1;
     int deviceId = -1;
+    // A synth in its boot ROM's update utility, waiting for an OS (OsUpdate.h)
+    bool updateMode = false;
+
+    // The model that answered; Unknown for the editor's own IAm and for a byte not listed.
+    SynthModel model() const
+    {
+        return sender == 1 && deviceId >= 0 && deviceId <= 2 ? static_cast<SynthModel>(deviceId) : SynthModel::Unknown;
+    }
+    static const char* modelName(SynthModel m)
+    {
+        return m == SynthModel::Keyboard ? "Keyboard" : m == SynthModel::Rack ? "Rack" : m == SynthModel::Micro ? "Micro" : "Unknown";
+    }
 
     std::vector<uint8_t> encode() const;
     static IAmMessage decode(const uint8_t* data, size_t length);
@@ -41,6 +63,21 @@ struct ParameterChangeMessage
 
     std::vector<uint8_t> encode() const;
     static ParameterChangeMessage decode(const uint8_t* data, size_t length);
+};
+
+// ParamFocus (cc=0x13, sc=0x2F): tells the synth which parameter the editor is
+// working on, so its display shows it. Captured from the original editor (it
+// sends one each time a different knob is grabbed, before the value changes;
+// G1originaleditor/notes/12). No checksum and no reply, like the original.
+// Section 2, module 1 addresses the four morph knobs, as in ParameterChange.
+struct ParameterFocusMessage
+{
+    int pid = 0;
+    int section = 0;
+    int module = 0;
+    int parameter = 0;
+
+    std::vector<uint8_t> encode() const;
 };
 
 struct AckMessage
@@ -163,6 +200,31 @@ struct GetPatchListMessage
     int position = 0;  // Position within bank (0-98)
 
     std::vector<uint8_t> encode() const;
+};
+
+// FlashDumpRequest: ask for the patch stored at a bank position, read straight
+// from flash. No slot is loaded or touched. Same envelope as GetPatchList.
+// Seen on the wire from Clavia's editor 3.03 (Bank Upload), 2026-10-18.
+struct FlashDumpRequestMessage
+{
+    int section = 0;   // Bank index (0-8)
+    int position = 0;  // Position within bank (0-98)
+
+    std::vector<uint8_t> encode() const;
+};
+
+// The synth's answer to a FlashDumpRequest. An occupied position comes back as
+// one PatchPacket whose stream opens with a 0x18 section (02, bank, position,
+// name) followed by the patch's own sections. An empty one comes back as an
+// ACK of type 0x18 (pid2 = 04, then bank and position).
+struct FlashDumpReply
+{
+    int section = -1;
+    int position = -1;
+
+    // Reads the opening 0x18 section of a PatchPacket's 7-bit data. False when
+    // the data is anything else.
+    static bool peek(const std::vector<uint8_t>& patchData, FlashDumpReply& out);
 };
 
 // PatchListEntry: one patch name with its location

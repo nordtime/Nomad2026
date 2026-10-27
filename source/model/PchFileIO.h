@@ -19,6 +19,11 @@ public:
     static bool isLegacyPatch210(const juce::File& file);
     static bool isLegacyPatch210(const juce::StringArray& lines);
 
+    // The text of a patch file. Old patches from Mac users come wrapped in a
+    // 128-byte MacBinary header (file name, type "PCH ", creator "NORD") before
+    // the text; this takes that off. Anything else is returned as it is.
+    static juce::String patchTextFromBytes(const juce::MemoryBlock& bytes);
+
     // The name a patch takes from its file when the file itself carries none,
     // which a classic .pch never does.
     //
@@ -45,6 +50,9 @@ private:
     void parseComments(const juce::StringArray& lines, Patch& patch);
     void parseNameDump(const juce::StringArray& lines, Patch& patch);
     std::unique_ptr<Patch> readLegacyFile(const juce::StringArray& lines, const juce::File& file);
+    static void convertLegacyParams(Module& module, int type);
+    static void convertLegacyAssignments(Patch& patch, int morphModule, const juce::StringArray& knobLines,
+                                         const juce::StringArray& controllerLines, const juce::StringArray& morphLines);
     static void normalizeLegacyModulePositions(ModuleContainer& container);
     static void connectLegacyCable(ModuleContainer& container, int sourceModule, int sourceConn,
                                    bool sourceIsOutput, int targetModule, int targetInput);
@@ -65,6 +73,7 @@ private:
     void writeComments(juce::String& out, const Patch& patch);
 
     static juce::StringArray tokenize(const juce::String& line);
+    static int splitAreaRows(const juce::StringArray& lines, juce::StringArray& rows);
     static juce::String getLegacyValue(const juce::StringArray& lines, const juce::String& key);
 
     const ModuleDescriptions& descs;

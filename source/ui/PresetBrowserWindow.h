@@ -1,11 +1,15 @@
 #pragma once
 
+#include <atomic>
+#include <vector>
 #include <juce_gui_basics/juce_gui_basics.h>
 
 class DiskPresetBrowserPanel : public juce::Component,
                                private juce::ListBoxModel
 {
 public:
+    enum class TypeFilter { All, Patches, Snippets, Banks, Sets };
+
     DiskPresetBrowserPanel();
 
     void setLibraryRoot(const juce::File& root);
@@ -16,6 +20,19 @@ public:
 
     std::function<void(const juce::File&)> onPatchChosen;
     std::function<void(const juce::File&)> onSnippetChosen;
+    std::function<void(const juce::File&)> onSetChosen;   // a slot set manifest
+
+    // "Hide 2.10" is remembered between sessions: the owner sets it at start and is told when it
+    // changes, so it can keep it.
+    void setHidePch2(bool hide)
+    {
+        hidePch2 = hide;
+        hidePch2Button.setToggleState(hide, juce::dontSendNotification);
+        rebuildVisibleEntries();
+        if (hide)
+            sniffLegacyInBackground();
+    }
+    std::function<void(bool)> onHidePch2Changed;
 
 private:
     class RefreshIconButton : public juce::Button
@@ -26,22 +43,38 @@ private:
 
     };
 
-    class FilterIconButton : public juce::Button
+    // Step to the previous or next entry in the list and load it, so a library
+    // can be auditioned without going back to the mouse for every file
+    // (issue #60). Steps through the visible entries, so search and the type
+    // filters bound it the way they bound the list itself.
+    class StepIconButton : public juce::Button
     {
     public:
-        enum class Icon { All, Patch, Snippet, Bank, Legacy };
-        FilterIconButton(const juce::String& name, Icon iconType);
+        StepIconButton(const juce::String& name, int direction);
         void paintButton(juce::Graphics& g, bool highlighted, bool down) override;
 
     private:
-        Icon icon;
+        int step;   // -1 previous, +1 next
     };
 
-    enum class TypeFilter { All, Patches, Snippets, Banks };
+    // One type filter, labelled with the same word its rows carry (PATCH,
+    // SNIP, BANK, SET), so the filter reads as the thing it keeps instead of
+    // an icon to learn.
+    class TypeChipButton : public juce::Button
+    {
+    public:
+        TypeChipButton(const juce::String& label, const juce::String& tooltip);
+        void paintButton(juce::Graphics& g, bool highlighted, bool down) override;
+
+        int getIdealWidth(int padding) const;
+
+    private:
+        juce::String label;
+    };
 
     struct Entry
     {
-        enum class Type { Patch, Snippet, Bank };
+        enum class Type { Patch, Snippet, Bank, Set };
         Type type = Type::Patch;
         juce::File file;
         juce::String displayName;
@@ -49,13 +82,34 @@ private:
         int legacyPatch210 = -1;  // -1 = not sniffed yet, 0 = no, 1 = yes
     };
 
+    // Loads the entry on `row`, whatever route asked for it: a double click,
+    // Enter, or the step buttons.
+    void loadRow(int row);
+    // Moves the selection by `delta` visible rows and loads what it lands on.
+    void stepSelection(int delta);
+    // Greys out whichever arrow has nowhere left to go.
+    void updateStepButtons();
+
     int getNumRows() override;
     void paintListBoxItem(int row, juce::Graphics& g, int width, int height, bool selected) override;
     void listBoxItemDoubleClicked(int row, const juce::MouseEvent&) override;
+    void returnKeyPressed(int lastRowSelected) override;
+    void selectedRowsChanged(int lastRowSelected) override;
     juce::var getDragSourceDescription(const juce::SparseSet<int>& selectedRows) override;
 
     void rebuildVisibleEntries();
-    void scanFolder(const juce::File& folder, Entry::Type type);
+    void layoutFilterRow();
+    // The library is read on a background thread: it can hold tens of thousands of files, and
+    // reading it (and opening each one to tell a 2.10 patch from a modern one) on the message
+    // thread froze the editor at startup and on Refresh. A scan that was started and then
+    // overtaken by a newer one is dropped when it finishes.
+    static void scanFolder(const juce::File& root, const juce::File& folder, Entry::Type type,
+                           const std::vector<juce::File>& skipFolders, std::vector<Entry>& out);
+    static std::vector<Entry> scanLibrary(const juce::File& root, bool sniffLegacy);
+    void scanFinished(std::vector<Entry> entries);
+    void sniffLegacyInBackground();
+    std::atomic<int> scanGeneration { 0 };
+    bool scanning = false;   // a read of the library is under way (message thread only)
     juce::String getTypeLabel(Entry::Type type) const;
     juce::String getTypeLabel(Entry& entry) const;
     // Sniffs the file on first use and caches the result on the entry, so
@@ -65,17 +119,24 @@ private:
 
     juce::Label searchLabel;
     juce::TextEditor searchBox;
-    FilterIconButton allButton { "All presets", FilterIconButton::Icon::All };
-    FilterIconButton patchesButton { "Patches", FilterIconButton::Icon::Patch };
-    FilterIconButton snippetsButton { "Snippets", FilterIconButton::Icon::Snippet };
-    FilterIconButton banksButton { "Banks", FilterIconButton::Icon::Bank };
-    FilterIconButton hidePch2Button { "Hide PCH2", FilterIconButton::Icon::Legacy };
+    TypeChipButton allButton { "ALL", "Show every file" };
+    TypeChipButton patchesButton { "PATCH", "Patches (.pch)" };
+    TypeChipButton snippetsButton { "SNIP", "Snippets: module groups that merge into the open patch" };
+    TypeChipButton banksButton { "BANK", "Bank backups, one .pch per bank position" };
+    TypeChipButton setsButton { "SET", "Slot sets: four slots saved and loaded together (.nmset)" };
+    // Not one of the type filters: it narrows whichever one is active, so it
+    // is a checkbox on its own, next to the file count it changes.
+    juce::ToggleButton hidePch2Button { "Hide 2.10" };
     RefreshIconButton refreshButton;
+    StepIconButton prevButton { "Previous preset", -1 };
+    StepIconButton nextButton { "Next preset", 1 };
     juce::Label statusLabel;
     juce::ListBox listBox { "Disk Presets", this };
 
+    juce::Rectangle<int> filterRowArea;
     juce::File libraryRoot;
     TypeFilter typeFilter = TypeFilter::All;
+    int rule1Y = 0, rule2Y = 0;   // the two hairlines: under the filters, and over the list
     bool hidePch2 = false;   // when true, legacy 2.10 (.pch2) patches are hidden
     std::vector<Entry> allEntries;
     std::vector<int> visibleEntryIndices;
@@ -101,6 +162,7 @@ public:
 
     std::function<void(const juce::File&)> onPatchChosen;
     std::function<void(const juce::File&)> onSnippetChosen;
+    std::function<void(const juce::File&)> onSetChosen;   // a slot set manifest
     std::function<void()> onChooseLibraryFolder;
 
 private:

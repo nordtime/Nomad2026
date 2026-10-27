@@ -4,9 +4,13 @@
 
 De arriba abajo:
 
-- **Barra de menús**: File, Edit, View, Device y Help. Device tiene las
+- **Barra de menús**: File, Edit, View, Device, Help y About. Device tiene las
   herramientas que hablan con el sintetizador (transferencia de bancos,
-  controller snapshot); View tiene las ventanas flotantes.
+  controller snapshot); View tiene las ventanas flotantes. Cuando sale una
+  versión nueva de NME, **About** lleva un punto rojo y su primera opción,
+  *Version X.Y.Z is out*, abre Patreon, que es donde están las descargas. NME
+  lo mira como mucho una vez al día al arrancar y nunca descarga nada por su
+  cuenta; en Editor Options se puede desactivar.
 - **Cabecera**: el nombre del patch actual (clic para renombrar), el contador
   **Voices** con sus flechas, los medidores **Load**, los cuatro **knobs de
   morph** y los **botones de variación** (8 por slot).
@@ -109,6 +113,11 @@ de forma selectiva, cambiar el estilo de cable (curvo/recto, grueso/fino) y su
 opacidad, y `S` "sacude" los cables para que los tramos solapados se
 redistribuyan.
 
+En una pantalla 4K el texto puede quedar demasiado pequeño. **UI size** en Editor
+Options (del 100 % al 300 %) escala toda la interfaz: ventanas, menús, diálogos y la
+ayuda de módulos (`F1`). Se aplica al pulsar OK y las ventanas crecen con ella; en 4K,
+un 200 % da el espacio de una pantalla 1080p con el texto nítido.
+
 ## Temas
 
 `Ctrl+T` rota entre los 13 temas de color, o elige uno en **View → Theme** (la
@@ -128,3 +137,35 @@ lugar de un relleno plano, más visible en Nord Classic.
 `Ctrl+W` alterna un estilo de módulo en wireframe que funciona con todos los
 temas. Ambos ajustes persisten entre sesiones, igual que el tamaño y posición de
 ventana y la disposición de los flotantes.
+
+### Tus propios temas
+
+Todo lo de los temas está en una ventana: **View → Themes...** (se abre y se cierra con la misma
+opción). Sus páginas están a la izquierda, como en Editor Options:
+
+- **Themes** lista todos los temas con una pequeña vista previa de sus colores; haz clic en uno para
+  usarlo. `Ctrl+T` sigue pasando de uno a otro desde cualquier sitio.
+- **Colours** es el editor de temas: una muestra por cada color, agrupadas (LEDs y medidores, cables y
+  jacks, knobs de morph, secuenciadores, knobs, módulos y canvas, aplicación). El canvas cambia mientras
+  arrastras un color; **Save** lo guarda como tema propio, y cerrar la ventana sin guardar devuelve el
+  tema elegido. Si marcas **Save the render style with the theme**, el tema también enciende o apaga
+  Wireframe, Hardware look y Flat knobs tal como están en pantalla cada vez que se elige.
+- **Community** muestra los temas que la gente comparte en
+  [animatek/nme-themes](https://github.com/animatek/nme-themes) en GitHub, con la marca **New** en los
+  que no habías visto y **Update** en los que han cambiado desde que los instalaste. Un clic instala el
+  tema y lo pone. NME mira esa lista como mucho una vez al día al arrancar, y lo avisa en la barra de
+  estado cuando hay algo nuevo (un punto en View, en la opción Themes y en la página Community);
+  **Check Now** mira en el momento. En Editor Options se puede desactivar la comprobación diaria.
+  Cualquiera puede añadir un tema allí con un pull request: el README del repo explica cómo.
+- **Files** mueve temas de entrada y de salida: **Import** instala un archivo de tema (primero lo
+  comprueba, luego lo copia a tu carpeta de temas y lo elige; uno tuyo con el mismo nombre solo se
+  sustituye si lo confirmas), **Export** guarda el tema en uso en un archivo que puedes pasar a otra
+  persona, **Save** lo guarda con tus cambios como archivo editable, **Reload** vuelve a leer la
+  carpeta y **Open** la muestra.
+
+Los temas son archivos JSON pequeños en una carpeta `themes` junto a los ajustes.
+
+Un tema puede traer su estilo de render. **Animatek Rack** enciende Flat knobs
+al elegirlo; al elegir un tema que no trae ninguno vuelves al estilo que tenías
+antes. Mientras estás en ese tema, Editor Options y los atajos lo siguen
+cambiando como siempre.

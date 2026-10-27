@@ -49,7 +49,7 @@ All reverse-engineering docs live in `docs/RESEARCH.md` — protocol spec, patch
 | `nmedit/libs/libnmprotocol/` | C/C++ protocol implementation |
 
 ### Protocol essentials
-- SysEx envelope: `F0 33 06 [cc:5][slot:2] [payload] F7`
+- SysEx envelope: `F0 33 [0:1 cc:5 slot:2] 06 [payload] F7` (the device byte `06` comes after the cc/slot byte)
 - All data 7-bit encoded, checksums = `sum % 128`
 - 3-second request/response timeout
 - Key commands: IAm(0x00), Parameter(0x13), NMInfo(0x14), ACK(0x16), PatchHandling(0x17)
@@ -71,3 +71,27 @@ Use `/nomad` with subcommands for quick reference:
 - `/nomad source <keyword>` — Search original Java/C++ source
 - `/nomad arch` — Architecture overview
 - `/nomad status` — Project roadmap progress
+
+## The shared CODE changelog
+
+On top of this repo's `CHANGELOG.md`, **every meaningful change also gets an entry in
+`/mnt/SPEED/CODE/CHANGELOG.md`**: the shared log across the seven projects, and what the panel's
+`Cambios` page shows. Without that line the change does not exist outside this repo — which is
+exactly what happened until 2026-09-10, when the panel only read the `Animatek.net` changelog.
+
+That entry is the summary: what changed, the real verification, the agent, and the commit or the
+path to this repo's changelog. Technical detail stays here and is not duplicated.
+
+- **Write entries with `cambios apuntar "<project>" "<what changed, verification, commit>" -a <agent>`**, not by editing the file: it files them under the date and project without rewriting anything or breaking the symlink (`cambios proyectos` lists the names; if the link is already broken, `cambios reparar`). Never `sed -i`, `>` or a whole-file write on it: that is how the symlink broke three times.
+- The path is a **symlink** to the canonical Obsidian note `00 - Sistema/CHANGELOG - CODE.md`.
+  Resolve it and edit the target; never replace it with a separate file or start a second copy.
+  If it is unavailable, report the blocker instead of inventing another location.
+- Write under the local date (Europe/Madrid), newest first, one section per project. Re-read the
+  current dated block first and patch only your own entry: several agents write there.
+- Uncommitted work is marked explicitly as `cambio local, sin commit`.
+- The panel picks it up in the next morning's ingest. To see it now:
+  `Animatek.net/panel/ingesta/actualizar.sh`.
+- **Do not read the whole thing just to write in it.** It grows ~13 KB a day and is split by
+  month: the current month in the note, closed months in `CHANGELOG - CODE/AAAA-MM.md` next to
+  it. Query it with `cambios` — `cambios buscar "morph"`, `cambios de NME`, `cambios ver
+  2026-09-10` — which asks the database and returns the entry, not the file.

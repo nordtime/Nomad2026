@@ -66,6 +66,16 @@ std::unique_ptr<Patch> PatchParser::parse(const std::vector<std::vector<uint8_t>
     for (const auto& entry : patch->commonCustomDump)
         patch->applyCustomDumpEntry(0, entry);
 
+    // A delete leaves the synth's morph and knob maps naming a module that is
+    // gone, and this is where they come back into the editor. Dropped here so
+    // they cannot latch onto the next module handed the same index.
+    if (const auto dropped = patch->dropDanglingAssignments(); dropped.total() > 0)
+        DBG("PatchParser: dropped " + juce::String(dropped.total())
+            + " assignment(s) naming a module the patch does not have ("
+            + juce::String(dropped.morphs) + " morph, "
+            + juce::String(dropped.knobs.size()) + " knob, "
+            + juce::String(dropped.ctrls.size()) + " MIDI CC)");
+
     DBG("PatchParser: done. Patch name: \"" + patch->getName() + "\"");
     DBG("  Poly modules: " + juce::String(patch->getPolyVoiceArea().getModules().size())
         + ", Common modules: " + juce::String(patch->getCommonArea().getModules().size()));
@@ -88,6 +98,7 @@ void PatchParser::parseSection(BitStream& bs, Patch& patch)
     {
         case 55:  parsePatchName(bs, patch);      break;
         case 39:  parsePatchName2(bs, patch);     break;
+        case 24:  parseFlashDumpMarker(bs, patch); break;
         case 33:  parseHeader(bs, patch);          break;
         case 74:  parseModuleDump(bs, patch);      break;
         case 82:  parseCableDump(bs, patch);       break;
@@ -119,6 +130,18 @@ void PatchParser::parsePatchName(BitStream& bs, Patch& patch)
     DBG("  PatchName: \"" + patch.getName() + "\"");
 }
 
+// FlashDumpMarker := 02:8 section:8 position:8 String$name — opens the synth's
+// answer to a FlashDumpRequest (a patch read from a bank position).
+void PatchParser::parseFlashDumpMarker(BitStream& bs, Patch& patch)
+{
+    bs.readBits(8); // 02 = a patch follows
+    bs.readBits(8); // section
+    bs.readBits(8); // position
+    auto name = bs.readString16();
+    patch.setName(juce::String(name));
+    DBG("  FlashDumpMarker: \"" + patch.getName() + "\"");
+}
+
 // PatchName2 := String$name  (no padding, used by synth PatchPacket responses)
 void PatchParser::parsePatchName2(BitStream& bs, Patch& patch)
 {
@@ -129,9 +152,11 @@ void PatchParser::parsePatchName2(BitStream& bs, Patch& patch)
 
 // Header := krangemin:7 krangemax:7 vrangemin:7 vrangemax:7
 //           brange:5 ptime:7 portamento:1 pedalMode:1 voices:5
-//           unknown2:2 sspos:12 octave:3
+//           sspos:14 octave:3
 //           red:1 blue:1 yellow:1 gray:1 green:1 purple:1 white:1
-//           cretrigger:1 pretrigger:1 unknown3:4 unknown4:3
+//           cretrigger:1 pretrigger:1 flags:4 padding:3
+// nmedit splits sspos into unknown2:2 + sspos:12 and calls flags unknown3;
+// Clavia's editor sends sspos as 14 bits and flags as four separate bits (#103).
 void PatchParser::parseHeader(BitStream& bs, Patch& patch)
 {
     auto& h = patch.getHeader();
@@ -144,8 +169,7 @@ void PatchParser::parseHeader(BitStream& bs, Patch& patch)
     h.portamento       = bs.readBits(1) != 0;
     h.pedalMode        = static_cast<int>(bs.readBits(1));
     h.voices           = static_cast<int>(bs.readBits(5)) + 1;  // stored 0-based, display 1-based
-    /*unknown2*/         bs.readBits(2);
-    h.separatorPosition = static_cast<int>(bs.readBits(12));
+    h.separatorPosition = static_cast<int>(bs.readBits(14));
     h.octaveShift      = static_cast<int>(bs.readBits(3));
     h.cableVisRed      = bs.readBits(1) != 0;
     h.cableVisBlue     = bs.readBits(1) != 0;
@@ -156,8 +180,9 @@ void PatchParser::parseHeader(BitStream& bs, Patch& patch)
     h.cableVisWhite         = bs.readBits(1) != 0;
     h.voiceRetriggerCommon  = static_cast<int>(bs.readBits(1));
     h.voiceRetriggerPoly    = static_cast<int>(bs.readBits(1));
-    h.unknown3              = static_cast<int>(bs.readBits(4));
-    h.unknown4              = static_cast<int>(bs.readBits(3));
+    for (auto& flag : h.headerFlags)
+        flag = static_cast<int>(bs.readBits(1));
+    /*padding*/               bs.readBits(3);
 
     DBG("  Header: voices=" + juce::String(h.voices)
         + " keys=" + juce::String(h.keyRangeMin) + "-" + juce::String(h.keyRangeMax)
@@ -228,7 +253,6 @@ void PatchParser::parseCableDump(BitStream& bs, Patch& patch)
         int firstConnectorType = static_cast<int>(bs.readBits(1));  // 0=input, 1=output
         int secondModuleIndex = static_cast<int>(bs.readBits(7));
         int secondConnectorIndex = static_cast<int>(bs.readBits(6));
-        (void)color; // stored implicitly through connector signal types
 
         // Binary cable record (per jpatch BitstreamPatchParser): the type bit
         // belongs to the FIRST (source) end — 1 = output, 0 = a chained input
@@ -259,8 +283,9 @@ void PatchParser::parseCableDump(BitStream& bs, Patch& patch)
         }
 
         // Connection's "output" slot holds the source end — for a chained
-        // cable (type bit 0) that is itself an input connector.
-        container.addConnection(firstConn, secondConn);
+        // cable (type bit 0) that is itself an input connector. The colour
+        // the synth stores is kept, and sent back as it came (#100).
+        container.addConnection(firstConn, secondConn, color);
     }
 }
 

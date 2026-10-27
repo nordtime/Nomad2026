@@ -58,6 +58,11 @@ tools to work; they return a clear error if it isn't.
 - `rename_module(section, container_index, name, slot?)` — undoable, like every
   other structural edit.
 - `delete_module(section, container_index, slot?)`
+- `replace_module(section, container_index, type_name?, type_id?, slot?)` — swap a
+  module for another of its family in place, as one undo step. Keeps position,
+  a user-given name, cables on connectors that exist on the new type, values of
+  parameters with the same name and range, and the assignments on them; reports
+  what was kept and dropped.
 - `connect_cable(section, out_container_index, out_connector,
   in_container_index, in_connector, out_is_output?, in_is_output?, slot?)`
 - `delete_cable(section, out_container_index, out_connector,
@@ -68,6 +73,73 @@ tools to work; they return a clear error if it isn't.
   modules. Prefer it to a run of `set_parameter` calls.
 - `set_parameter(section, container_index, parameter_name?, parameter_id?,
   value?, delta?, slot?)`
+
+Choosing the synth and reloading from it:
+
+- `list_midi_ports()` — the MIDI inputs and outputs with id and name, and which
+  ones the editor is on.
+- `connect_midi(input, output)` and `disconnect_midi()` — what the MIDI settings
+  dialog does. A port is named by id, exact name or a part only one port has;
+  anything ambiguous is refused. Then poll `get_synth_status` until `synthName`
+  is not null and check it: G1-Emu and a real G1 can both be on the machine.
+- `fetch_patch(slot?)` — ask the synth for a slot's patch again, replacing the
+  editor's copy. With `save_patch`, this compares what the synth holds with what
+  was sent.
+
+Reading the synth back (these send nothing):
+
+- `get_synth_status()` — connection, synth name (null until it has answered) and OS version, the slot the synth
+  has focused versus the editor's active tab, transfers in flight, and per slot:
+  patch name, LOCAL, enabled, voice count, bank location.
+- `get_events(after?, limit?, types?)` — what the synth and the connection did
+  since a given event: synth errors, connection changes, values the synth
+  reported itself (a front-panel knob, a morph dial, a MIDI CC), slot focus and
+  enable changes, patches received or incomplete, voice counts. Resume from the
+  returned `latestSeq`; `truncated` says the 512-event log wrapped in between.
+- `read_lights(section?, container_index?, slot?)` — per-module LEDs (0-3) and
+  meters, for the slot the synth has focused (the only one it streams).
+- `list_bank(bank, include_empty?)` — the patch name in each position of a synth
+  bank, or null when empty, from the list fetched on connect. `store_to_bank`
+  overwrites without asking: look here first.
+- `save_bank(bank, folder)` — a whole bank to a folder, read straight from the
+  synth's memory: `NN - Name.pch` files and a `BankN.pchList`. No slot changes.
+- `send_bank(bank, source)` — a `.pchList` (NME's or Clavia's) or a folder into a
+  bank, each patch to its position, straight to memory. Overwrites those
+  positions without asking. No slot changes.
+- `get_bank_transfer()`, `cancel_bank_transfer()` — a bank transfer takes
+  seconds, so the two above only start it: poll this until `finished`.
+
+Assignments (undoable, through the same actions as the canvas):
+
+- `list_assignments(slot?)` — knob, morph group and MIDI CC assignments.
+- `assign_knob(knob, section?, container_index?, parameter_name?, parameter_id?,
+  morph_group?, replace?, slot?)` and `unassign_knob(knob, slot?)` — `knob` is an
+  index 0-22 or a panel name (`"Knob 7"`, `"Pedal"`, `"After touch"`,
+  `"On/Off switch"`); a bare `"7"` is refused as ambiguous. The target is a module
+  parameter or a morph group's dial. A knob already in use fails with
+  `knob_in_use` unless `replace=true`, and one undo then gives it back.
+- `assign_morph(section, container_index, group, range?, parameter_name?,
+  parameter_id?, slot?)` and `unassign_morph(section, container_index, ...)` —
+  group 0-3, signed range -127..127, at most 25 morph assignments per patch.
+- `assign_midi_cc(cc, <target as for assign_knob>, replace?, slot?)` and
+  `unassign_midi_cc(cc, slot?)` — CC 0-119.
+
+Playing it:
+
+- `set_morph_value(morph_group, value?, delta?, slot?)` — turn a morph dial, as
+  the header bar does (not an undo step).
+- `play_note(note, duration_ms?)` — sound a note on the synth's focused slot.
+
+## Testing against a real G1
+
+The read-back tools are there so an assistant can check its own work on the
+hardware: `get_synth_status` before starting, then an edit, then
+`get_events(after=...)` to see whether the synth answered with an error, and
+`play_note` with `read_lights` to confirm the patch makes signal.
+
+Work in a slot you do not mind losing, and back the banks up first. Edits to a
+LOCAL slot are still sent to the synth while it is connected (plan item S4), so
+LOCAL is not yet a safe sandbox.
 
 `slot` is 0-3 (A-D), defaulting to whichever tab is currently active in the
 editor. `section` is 0 (common) or 1 (poly) — most modules go in poly.

@@ -11,11 +11,15 @@
 #include "PresetBrowserWindow.h"
 #include "ModuleIconBar.h"
 #include "../model/ModuleDescriptions.h"
+#include "../midi/SynthHub.h"
 
-// Custom slot selector panel — shows 4 slot buttons with patch names.
-// Mirrors the hardware slot LEDs: fixed = enabled, blinking = focused,
-// off = disabled. Ctrl+click a row to toggle that slot's enable state
-// (like the original 3.3 editor); plain click moves focus.
+// Slot selector panel, laid out like a row of the original editor's toolbar: the
+// A B C D buttons of the synth, its name in a box (dark when it is the one being
+// edited) and its DSP load as a bar. One synth for now; the row is built to be
+// repeated for up to four (#88). Mirrors the hardware slot LEDs on the buttons:
+// fixed = enabled, blinking = focused, off = disabled. Ctrl+click a button to
+// toggle that slot's enable state (like the original 3.3 editor); plain click
+// moves focus.
 class SlotBar : public juce::Component,
                 public juce::DragAndDropTarget,
                 private juce::Timer
@@ -26,6 +30,7 @@ public:
 
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent& e) override;
+    void mouseDoubleClick(const juce::MouseEvent& e) override;   // on a synth's name: rename it
     void resized() override;
 
     // A patch dragged out of either browser can be dropped on a slot row to
@@ -43,10 +48,27 @@ public:
     void setCurrentTab(int index);
     int  getCurrentTabIndex() const { return activeIndex; }
     void setSlotName(int slot, const juce::String& patchName);
-    void setSlotsEnabled(const std::array<bool, 4>& enabled);
+    void setSlotsEnabled(int synth, const std::array<bool, 4>& enabled);
     void setSlotLocal(int slot, bool local);  // show a "LOCAL" (not-synced) badge
+    void setSynthName(int synth, const juce::String& name);  // the name box; empty = no synth
+    void setLoad(int synth, float fraction);                 // the DSP bar, 0..1; negative = unknown
+    // Rows are shown only for synths that are there (or being edited): four empty rows of
+    // "No synth" are four rows of nothing. The bar's height follows.
+    void setRowShown(int synth, bool shown);
+    // A Micro Modular has one slot: the others get no button (nothing to draw, click or drop onto).
+    void setSlotCount(int synth, int count);
+    int getPreferredHeight() const;
+    // Emulators found that no port is left for: said in the header, so a fifth (or ninth) synth
+    // is not silently left out.
+    void setWaitingEmulators(int count);
+    std::function<void()> onRowsChanged;
+    // Asked for the load on every blink of the LEDs, so the bar follows edits
+    // without every place that changes a patch having to say so.
+    std::function<float(int synth)> loadProvider;
 
     std::function<void(int)> onSlotChanged;
+    std::function<void(int)> onSynthSelected;    // click on a synth's name box
+    std::function<void(int)> onSynthRenameRequested;   // double-click on it
     std::function<void(int)> onSlotEnableToggled;  // Ctrl+click on this slot
     std::function<void(int)> onSlotViewToggled;  // Right-click: show/hide this slot
 
@@ -54,52 +76,34 @@ private:
     void timerCallback() override;
     juce::Rectangle<int> ledBounds(int slot) const;
 
-    static constexpr int numSlots = 4;
+    // One row per synth, each with its own four slot buttons: slots are numbered
+    // globally (synth * 4 + slot), as everywhere else in the editor.
+    static constexpr int numSlots = kTotalSlots;
     int activeIndex = 0;
     bool slotEnabledFlags[numSlots] = {};
     bool slotLocalFlags[numSlots] = {};
     bool blinkPhase = false;
     juce::String slotNames[numSlots];  // patch names per slot
-    juce::Rectangle<int> slotBounds[numSlots];
+    juce::Rectangle<int> slotBounds[numSlots];   // the A B C D buttons
+    juce::Rectangle<int> numBounds[kMaxSynths], nameBounds[kMaxSynths], loadBounds[kMaxSynths];
+    juce::String synthName[kMaxSynths];
+    bool rowShown[kMaxSynths] = { true };
+    int  slotCounts[kMaxSynths] = { kSlotsPerSynth, kSlotsPerSynth, kSlotsPerSynth, kSlotsPerSynth, kSlotsPerSynth, kSlotsPerSynth, kSlotsPerSynth, kSlotsPerSynth };
+    int waitingEmulators = 0;
+    // The panel's frame: a header with a rule above it (the inspector ends there), the rows, and
+    // a margin before the status bar.
+    static constexpr int kHeaderH = 28, kRowH = 42, kBottomPad = 8;
+    float loadFraction[kMaxSynths];
     // Row a patch is currently being dragged over, -1 when none. Painted so the
     // drop says where it is going before it happens.
     int dropTargetSlot = -1;
     void updateDropTarget(int slot);
     int slotAt(juce::Point<int> pos) const;
 
-    static constexpr const char* slotLetters[] = { "A", "B", "C", "D" };
+    static constexpr const char* slotLetters[] = { "A", "B", "C", "D" };   // the letters of the buttons of every row
 
-    // Keyboard icon SVG path (simplified synth icon)
-    void drawSlotIcon(juce::Graphics& g, juce::Rectangle<int> area, bool active);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SlotBar)
-};
-
-// Narrow clickable strip with a chevron that collapses/expands the panel it
-// sits next to. It stays put when the panel is hidden, so it is also the way
-// back.
-class PanelToggleStrip : public juce::Component
-{
-public:
-    explicit PanelToggleStrip(bool leftEdge);
-
-    void paint(juce::Graphics& g) override;
-    void mouseDown(const juce::MouseEvent& e) override;
-    void mouseEnter(const juce::MouseEvent& e) override;
-    void mouseExit(const juce::MouseEvent& e) override;
-
-    void setPanelOpen(bool open);
-
-    std::function<void()> onToggle;
-
-    static constexpr int stripWidth = 14;
-
-private:
-    const bool isLeftEdge;      // strip for the left panel, chevron mirrored
-    bool panelOpen = true;
-    bool hovered = false;
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PanelToggleStrip)
 };
 
 class MainLayout : public juce::Component,
@@ -147,30 +151,22 @@ public:
     bool isLeftPanelVisible() const  { return leftPanelVisible; }
     bool isRightPanelVisible() const { return rightPanelVisible; }
 
-    // Chevron strip clicked: true for the left panel, false for the right one.
+    // The inspector or browser switch of the status bar clicked: true for the left panel, false for the right one.
     // Routed out so the toggle goes through the same place as the shortcuts and
     // reports in the status bar. Falls back to toggling directly if unwired.
     std::function<void(bool)> onPanelToggleRequested;
 
-    std::function<void(int)> onSlotChanged;  // called with slot index 0-3
+    std::function<void(int)> onSlotChanged;  // called with the global slot index
+    std::function<void(int)> onSynthSelected;
+    std::function<void(int)> onSynthRenameRequested;
     std::function<void(int)> onSlotViewToggled;  // right-click a slot row: show/hide its sub-window
-    std::function<void()> onMidiSettingsClicked;
-    std::function<void()> onStoreToBankClicked;
-    std::function<void()> onLibraryFolderClicked;
 
 private:
-    // Left column: inspector + toolbar + slots
+    // Left column: inspector + slots
     SlotBar           slotBar;
     InspectorPanel    inspectorPanel;
 
-    // Toolbar buttons
-    juce::TextButton midiButton { "MIDI" };
-    juce::TextButton libraryButton { "Library" };
-    juce::TextButton storeButton { "Store" };
     juce::Component   leftColumn;   // groups all left elements
-
-    PanelToggleStrip  leftToggleStrip { true };
-    PanelToggleStrip  rightToggleStrip { false };
 
     ModuleIconBar     moduleIconBar;      // full width, under the header bar
     SlotMdiArea       patchArea;          // centre — the slots as sub-windows
@@ -191,9 +187,7 @@ private:
     int  savedLeftWidth    = 210;   // preferred sizes below, restored on re-show
     int  savedRightWidth   = 220;
 
-    static constexpr int statusBarHeight = 24;
-    static constexpr int slotBarHeight   = 100;  // 4 rows × 25px
-    static constexpr int toolbarHeight   = 28;
+    static constexpr int statusBarHeight = 30;
     static constexpr int headerBarHeight = 48;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainLayout)

@@ -63,6 +63,7 @@ struct ColorScheme
     juce::Colour meterHigh;
     juce::Colour meterTrack;
     juce::Colour meterBg;        // meter track background (dark fill behind bars)
+    juce::Colour ledStep { 0xff3fe64a };   // hardware look: lit step and activity LEDs (green)
 
     // Custom displays (envelopes, LFO, filter curves)
     juce::Colour displayBgCustom;
@@ -94,6 +95,13 @@ struct ColorScheme
     juce::Colour incrementBorder;
     juce::Colour incrementFg;
 
+    // Sequencer colours. Transparent (the default) keeps the derived look: the grip in the
+    // reset text colour, a lit EventSeq step from the module colour, notes in the display curves.
+    juce::Colour sliderGrip;         // grip of the vertical sliders (NoteSeqA, CtrlSeq...)
+    juce::Colour stepOn;             // a lit step toggle (EventSeq)
+    juce::Colour seqNote;            // NoteSeqB note blocks
+    juce::Colour seqNoteActive;      // NoteSeqB note under the playhead
+
     // Mute button active state
     juce::Colour muteActive;
 
@@ -115,6 +123,20 @@ struct ColorScheme
     // bodies, displays, icon boxes) are drawn as outlines only — set independently
     // of the theme palette (Editor Options toggle), not by the theme factories.
     bool wireframe = false;
+    // Skeuomorphic rendering: knobs and jacks drawn as hardware (recessed wells,
+    // domed caps, metal nuts) instead of flat discs. Like wireframe, a render
+    // style rather than a palette, so the theme factories leave it alone.
+    // Ignored while wireframe is on.
+    bool skeuomorphic = false;
+
+    // Knob look when skeuomorphic is on: 0 = domed cap in the theme's knob
+    // colour, 1 = black knurled, 2 = aluminium knurled.
+    int knobStyle = 2;   // set from EditorOptions by MainComponent
+
+    // Flat knobs, as on the Animatek Rack modules (dark disc, value arc on the rim).
+    // A render style like the two above; ignored with skeuomorphic or wireframe on.
+    bool flatKnobs = false;
+    juce::Colour knobArc { 0xff2c7fff };   // the value arc of a flat knob: the theme's secondary colour
 };
 
 extern const ColorScheme kClassicTheme;

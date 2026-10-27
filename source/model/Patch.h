@@ -63,6 +63,14 @@ struct Connection
 {
     Connector* output = nullptr;
     Connector* input = nullptr;
+    // The colour the patch stores for this cable (0-6, as SignalType), as read from a .pch or
+    // from the synth, and written back unchanged, as Clavia's editor does; -1 for a cable made in
+    // NME, coloured by where it starts. A stored colour says what the connection is (a master-
+    // slave cable from an audio output is grey), and user1/user2 can only be stored (#100).
+    int storedColor = -1;
+    SignalType colour() const;   // the stored one, or the source connector's signal type
+
+    static int validColor(int c) { return c >= 0 && c <= static_cast<int>(SignalType::None) ? c : -1; }
 };
 
 class Module
@@ -74,8 +82,14 @@ public:
 
     const ModuleDescriptor* getDescriptor() const { return descriptor; }
 
+    // The G1 keeps 16 characters of a module's name and drops the rest. Held to
+    // that here, where every path sets it (file load, rename, replace, undo), so
+    // the editor never shows a name the synth does not have: patches saved
+    // elsewhere with longer names came back from the synth cut, and no longer
+    // matched their own file.
+    static constexpr int kMaxTitleLength = 16;
     const juce::String& getTitle() const { return title; }
-    void setTitle(const juce::String& t) { title = t; }
+    void setTitle(const juce::String& t) { title = t.substring(0, kMaxTitleLength); }
 
     juce::Point<int> getPosition() const { return position; }
     void setPosition(juce::Point<int> p);
@@ -165,7 +179,8 @@ public:
 
     bool canAdd(const ModuleDescriptor& desc) const;
 
-    void addConnection(Connector* output, Connector* input);
+    void addConnection(Connector* output, Connector* input, int storedColor = -1);
+    int getStoredColor(const Connector* output, const Connector* input) const;   // -1: none
     void removeConnection(Connector* output, Connector* input);
     void removeConnectionsForConnector(Connector* conn);
 
@@ -180,6 +195,13 @@ public:
     Connector* findNetOutput(Connector* start,
                              const Connector* ignoreOutput = nullptr,
                              const Connector* ignoreInput = nullptr);
+
+    /** The colour of `c` as the editor draws it, saves it and sends it: a stored
+     *  colour wins; a cable straight from an output has that output's signal type;
+     *  a daisy-chained cable (input to input) has the signal type of the output
+     *  driving the net, the original source, so a chain keeps one colour all the
+     *  way along. A chain with no driver yet falls back to `c.colour()`. */
+    SignalType colourOf(const Connection& c) const;
 
     Module* getModuleByIndex(int containerIndex);
     const Module* getModuleByIndex(int containerIndex) const;
@@ -245,8 +267,11 @@ struct PatchHeader
     // Voice retrigger
     int voiceRetriggerPoly = 1;
     int voiceRetriggerCommon = 1;
-    // Unknown fields (preserved for round-trip fidelity)
-    int unknown1 = 0, unknown2 = 0, unknown3 = 0, unknown4 = 0;
+    // Four one-bit flags of unknown meaning, on by default. Clavia's editor 3.03
+    // keeps them as an array of four (0x00418b00/0x00418b20), writes them as
+    // four numbers in a .pch's [Header] (0x004d87e0) and sends them as four
+    // bits after the retriggers (0x00431980, nmedit's "unknown3:4") (#103).
+    std::array<int, 4> headerFlags { 1, 1, 1, 1 };
     // Cable visibility flags
     bool cableVisRed = true;
     bool cableVisBlue = true;
@@ -365,6 +390,31 @@ public:
     // Apply a custom dump entry to the matching module's custom-class
     // parameters (sequencer events, clock-divider displays, ...)
     void applyCustomDumpEntry(int section, const CustomDumpEntry& entry);
+
+    // What dropDanglingAssignments() threw away. The knob and MIDI-CC lists
+    // matter beyond the count: the synth still holds those assignments, and its
+    // panel keeps their LEDs lit until it is told knob by knob. Dropping them
+    // from the model alone is what leaves a light on that nothing can reach.
+    struct DroppedAssignments
+    {
+        std::vector<int> knobs;   // knob indices (KnobMapDump order)
+        std::vector<int> ctrls;   // MIDI CC numbers
+        int morphs = 0;
+        int total() const { return static_cast<int>(knobs.size() + ctrls.size()) + morphs; }
+    };
+
+    // Drop morph, knob and MIDI-CC assignments that name a module the patch
+    // does not have. They are what a delete leaves behind on the synth (nothing
+    // in the protocol unassigns a morph, so the synth's map keeps the entry
+    // after the module is gone), and re-fetching that patch brings them back
+    // into the model. Kept, they latch onto the next module to land on the same
+    // index. Only the voice areas are checked: section 2 is the morph section,
+    // whose module always exists.
+    DroppedAssignments dropDanglingAssignments();
+
+    // Set by the call above, and read once by whoever installs the patch in a
+    // slot: if the synth is the one holding it, the panel needs the deassigns.
+    DroppedAssignments danglingDropped;
 
     // Notes
     std::vector<NoteSlot> notes;

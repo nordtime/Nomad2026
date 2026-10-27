@@ -33,7 +33,9 @@ The canvas was split from one 9,330-line file into six. It is provably the same
 code, but every line that draws a module moved, so this block is a sweep for
 anything that vanished.
 
-1. Launch with no patch. The empty canvas reads "Press Enter to add modules".
+1. Launch with no patch. The canvas is flat and gridless and reads "No patch
+   open"; after `Ctrl+N` the grid comes back and the hint becomes "Press Enter to
+   add modules".
 2. Open `all.pch`. Every module draws its face: knobs, sliders, buttons, LEDs,
    text displays, the little icons on the buttons.
    **Look for**: a blank module face, missing knobs, a wrong colour, a missing
@@ -46,6 +48,11 @@ anything that vanished.
    and double-clicking opens the editor.
 6. Add a sequencer (NoteSeqA or EventSeq). Its step display draws and its
    Rnd/Clr buttons are there.
+7. Add a **NoteSeqB**, hover a step: the badge reads a number. Turn on **Read
+   sequencer steps as note names** in Editor Options and hover it again: it reads
+   a pitch (`C4` on a fresh module), and the Inspector row reads the same. A
+   NoteSeqA step reads `0` at its default and `+7 (G)` seven steps up. Nothing
+   else in the patch changes what it says.
 
 ## Block B: selection, delete, undo (~15 min)
 
@@ -139,3 +146,28 @@ terminal output is the valuable part.
 Blocks A and C are about pixels, so a screenshot usually says it faster than a
 sentence. Block B is about behaviour, so the sequence of clicks matters more
 than the picture.
+
+## Follow-up: MIDI disconnect (S1, 2026-09-11)
+
+Pending hardware/platform verification after the automated lifetime tests passed.
+Use disposable working-slot patches and first save valuable work to independent
+files. Do not rely on Backup All Banks for that safety copy until S2 is fixed.
+These checks must not store to or erase synth bank locations.
+
+1. Disconnect while idle, wait more than three seconds and reconnect. The app
+   remains responsive, learns the synth state again and accepts new parameter edits.
+2. Disconnect while a patch download or bank-list fetch is pending. Wait beyond
+   the old timeout, reconnect and confirm the old requests do not resume over the
+   new connection and no stale partial patch is delivered.
+3. Disconnect during a working-slot upload using MIDI Settings while the interface
+   is still available. The SysEx Monitor should show the closing packet before the
+   port closes; reconnect must work without power-cycling the G1.
+4. Queue a bulk parameter change on a disposable patch, then disconnect/reconnect.
+   Already transmitted edits may remain on the synth, but unsent old deltas must
+   not be transmitted after reconnect. New edits must still work.
+5. Exercise a failed port-open attempt with an unavailable interface, then choose
+   valid ports. Also close the editor immediately after applying synth settings;
+   there must be no delayed readback crash or stale request after restarting.
+
+Record OS, MIDI interface, scenario and actual outcome. Automated runs did not open
+ports, launch the editor UI or verify these steps against physical hardware.

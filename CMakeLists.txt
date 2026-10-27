@@ -9,7 +9,7 @@ if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
         "Minimum macOS version supported by Animatek NME")
 endif()
 
-project(AnimatekNME VERSION 0.17.0 LANGUAGES C CXX)
+project(AnimatekNME VERSION 0.24.0 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 
@@ -64,6 +64,7 @@ endif()
 # --- Shared source files (used by both standalone and plugin) ---
 set(NME_SHARED_SOURCES
     source/MainComponent.cpp
+    source/MainComponentSlotSets.cpp
 
     # Data Model
     source/model/ModuleDescriptions.cpp
@@ -79,6 +80,8 @@ set(NME_SHARED_SOURCES
     source/model/MutationCategories.cpp
     source/model/PchFileIO.cpp
     source/model/SnipFileIO.cpp
+    source/model/SlotSet.cpp
+    source/model/SessionState.cpp
     source/model/ThemeData.cpp
 
     # Value Formatters (ported from nmformat.js)
@@ -99,6 +102,12 @@ set(NME_SHARED_SOURCES
     source/ui/PatchCanvasPresets.cpp
     source/ui/ColorScheme.cpp
     source/ui/ThemeRegistry.cpp
+    source/ui/ThemeFile.cpp
+    source/ui/ThemeEditorPanel.cpp
+    source/ui/ThemesDialog.cpp
+    source/ui/CommunityThemes.cpp
+    source/ui/CommunityThemesPanel.cpp
+    source/ui/VersionCheck.cpp
     source/ui/InspectorPanel.cpp
     source/ui/StatusBar.cpp
     source/ui/PatchHeaderBar.cpp
@@ -107,14 +116,18 @@ set(NME_SHARED_SOURCES
     source/ui/PatchLocationDialog.cpp
     source/ui/AboutDialog.cpp
     source/ui/SlotSelectDialog.cpp
+    source/ui/WindowOwner.cpp
+    source/ui/SaveSlotSetDialog.cpp
     source/ui/PatchSettingsDialog.cpp
     source/ui/MidiSettingsDialog.cpp
     source/ui/SynthSettingsDialog.cpp
     source/ui/EditorOptionsDialog.cpp
+    source/ui/ShortcutsDialog.cpp
     source/ui/QuickAddPopup.cpp
     source/ui/PatchBrowserPanel.cpp
     source/ui/PresetBrowserWindow.cpp
     source/ui/BankTransferDialog.cpp
+    source/ui/OsUpdateDialog.cpp
     source/ui/KnobFloaterWindow.cpp
     source/ui/KeyboardFloaterWindow.cpp
     source/ui/PatchNotesFloaterWindow.cpp
@@ -126,9 +139,11 @@ set(NME_SHARED_SOURCES
     # MIDI/SysEx
     source/midi/SysExCodec.cpp
     source/midi/UploadPacketizer.cpp
+    source/midi/OsUpdate.cpp
     source/midi/NmMessages.cpp
     source/midi/NmProtocol.cpp
     source/midi/MidiDeviceManager.cpp
+    source/midi/DirectLink.cpp
     source/midi/ConnectionManager.cpp
     source/midi/MidiMonitor.cpp
 
@@ -136,6 +151,7 @@ set(NME_SHARED_SOURCES
     source/protocol/SysExMessage.cpp
     source/protocol/NewCableMessage.cpp
     source/protocol/DeleteCableMessage.cpp
+    source/protocol/RecolorCableMessage.cpp
     source/protocol/MoveModuleMessage.cpp
     source/protocol/NewModuleMessage.cpp
     source/protocol/DeleteModuleMessage.cpp
@@ -154,6 +170,17 @@ set(NME_SHARED_SOURCES
     # Synchronization
     source/sync/PatchSynchronizer.cpp
     source/sync/BankTransferManager.cpp
+    source/sync/PchList.cpp
+
+    # Swapping a module for another of its family, in place
+    source/model/ModuleReplacement.cpp
+
+    # Key Quantizer scale presets, on any root
+    source/model/KeyQuantScales.cpp
+
+    # What the synth did, kept for the MCP bridge. Plain data and no socket, so
+    # it is shared: MainComponent records into it whether or not the bridge is built.
+    source/mcp/McpEventLog.cpp
 
     # Help system
     source/help/ModuleHelpData.cpp
@@ -285,6 +312,7 @@ foreach(target ${NME_TARGETS})
     target_link_libraries(${target} PRIVATE
         NmeData
         juce::juce_core
+        juce::juce_cryptography   # SHA-256 of community theme files (#91)
         juce::juce_events
         juce::juce_data_structures
         juce::juce_graphics
@@ -296,6 +324,7 @@ foreach(target ${NME_TARGETS})
         juce::juce_audio_utils
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
+        ${CMAKE_DL_LIBS}          # dlopen of libX11 (ui/WindowOwner.cpp, Linux)
     )
 endforeach()
 

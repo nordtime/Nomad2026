@@ -49,6 +49,13 @@ The sub-windows slide to their new places rather than jumping. Turn that off
 with **Animate Slot Tiling** in Editor Options (`Ctrl+,`) if you prefer it
 instant.
 
+With several synths connected (MIDI Setup, `Ctrl+M`, has a port for each), every
+synth has its own row in the slot bar and its own windows, titled with the slot,
+the patch and the synth's name. On startup only Port 1's windows come back; another
+synth's open when it connects and close when it goes. To get every window of the
+last session back instead, turn on **Reopen Every Slot Window of the Last Session**
+in Editor Options.
+
 Each slot keeps its own canvas, selection and undo history, and edits land on
 the right slot even when it doesn't have hardware focus. Every sub-window
 follows the synth live: turning a physical knob on the front panel, or a light or
@@ -118,8 +125,8 @@ The right-side browser (`Ctrl+B`) lists the synth's 9 internal banks. You can:
 - **store** the current patch to a bank position,
 - **copy, move and delete** patches inside synth memory.
 
-Legacy Nord Modular 2.10 files are tagged **PCH2** in the disk browser and load
-transparently.
+Legacy Nord Modular 2.10 files are tagged **PCH2** in the disk browser and are
+converted as they load (see [Files & Formats](06-files-and-formats.md)).
 
 ## Storing a patch in the synth
 
@@ -154,16 +161,47 @@ In those cases the editor looks the patch name up in the bank list:
   one click stores again.
 - **no position** carries it: the button shows `--` and a click opens the dialog.
 
+## Slot sets
+
+Layered patches, one per slot, only make their sound together, and the G1 has
+no way to store the group: a bank position holds one patch. A **slot set**
+keeps the group in the editor instead.
+
+- **File > Save Slot Set...** asks for a name and, for each slot, whether the set
+  **includes its patch**, **switches the slot off** or **leaves it as is**. A set
+  of two or three patches is a set whose other slots are left as is. The
+  optional notes are shown again every time the set is loaded.
+- The set is written to `Sets/<name>/` in the preset library: a copy of each
+  included patch (with its `.var`), named after its slot letter, and a
+  `<name>.nmset` manifest. The copies are ordinary `.pch` files, so editing a
+  patch afterwards does not change the set: save the set again to update it.
+- **File > Open Slot Set...**, or a double click on a **SET** entry in the Disk
+  tab, first shows what goes into which slot and what it replaces. Then the
+  patches go to the synth one at a time, each waiting for the previous upload to
+  be acknowledged, the slots are switched on or off as saved, and focus moves to
+  the slot that was active when the set was saved. The synth never switches off
+  its focused slot, so focus always lands on a slot the set leaves on.
+- Disconnected, the patches load into the editor only (**LOCAL**) and no slot is
+  switched on or off.
+- If an upload fails, loading carries on with the next slot, that slot is marked
+  LOCAL, and a message at the end lists what went wrong.
+
+The manifest also records each patch's bank location when the editor knew it
+(`414`), for reference only: a set always loads its own copies, never the bank.
+
 ## Bank transfers (Device menu)
 
-- **Save Bank to Disk**: dump a whole synth bank to a folder; position
-  metadata is preserved in the `NN - Name.pch` filenames.
-- **Send Bank to Synth**: upload a folder of patches into a bank, with an
-  overwrite warning; a failed transfer stops cleanly.
+- **Save Bank to Disk**: dump a whole synth bank to a folder, as
+  `NN - Name.pch` files plus a `BankN.pchList` that keeps their positions.
+- **Send Bank to Synth**: write a `.pchList` (yours, or one saved by Clavia's
+  editor) or a folder of patches into a bank, with an overwrite warning; a
+  failed transfer stops cleanly.
 - **Backup All Banks to Library**: mirror all 9 banks into your preset
   library's `Banks/Bank1`–`Bank9` folders in one action.
 
-All transfers show progress and can be cancelled.
+Like Clavia's editor, transfers go straight to and from the synth's memory:
+no slot is loaded or changed, and a bank takes seconds. All transfers show
+progress and can be cancelled.
 
 ## Controller snapshot (Device menu)
 

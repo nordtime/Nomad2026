@@ -4,9 +4,12 @@
 
 From top to bottom:
 
-- **Menu bar**: File, Edit, View, Device and Help menus. Device holds the
+- **Menu bar**: File, Edit, View, Device, Help and About menus. Device holds the
   synth-facing tools (bank transfers, controller snapshot); View holds the
-  floating windows.
+  floating windows. When a new version of NME is out, **About** gets a red dot
+  and its first item, *Version X.Y.Z is out*, opens Patreon, where the builds
+  are. NME looks once a day at most when it starts, and never downloads
+  anything itself; Editor Options can turn the look off.
 - **Header bar**: the current patch name (click to rename), the **Voices**
   counter with up/down arrows, the **Load** meters, the four **morph group
   knobs**, and the **snapshot/variation buttons** (8 per slot).
@@ -109,6 +112,11 @@ The View menu and header tools let you hide cable colors selectively, and `S`
 the canvas follows the opacity slider while you drag it, and Cancel puts the
 old value back.
 
+On a 4K screen the text can be too small to read. **UI size** in Editor Options
+(100% to 300%) scales the whole interface: windows, menus, dialogs and the module
+help (`F1`). It applies when you press OK, and the windows grow with it, so on a 4K
+screen 200% gives the room of a 1080p one with sharp text.
+
 ## Themes
 
 `Ctrl+T` cycles the 13 color themes, or pick one from **View → Theme** (the
@@ -124,6 +132,42 @@ stays legible on light and dark themes alike. A very light procedural grain over
 the canvas gives it a paper feel instead of a flat fill, most visible on Nord
 Classic.
 
-`Ctrl+W` (macOS: `Cmd+Shift+W`) toggles a wireframe module style that works with every theme. Both
+`Ctrl+W` (macOS: `Cmd+Shift+W`) toggles a wireframe module style that works with every theme. `Ctrl+H` (macOS: `Cmd+Shift+H`)
+toggles the **hardware look**, which draws knobs, jacks, panels, displays and cables as physical
+hardware; Editor Options lets you pick the knob style (domed cap, black knurled, aluminium
+knurled). It also works with every theme. Editor Options also has **Flat knobs**, a flatter knob (dark or light disc
+following the theme, with the value drawn as an arc on its rim) for when the hardware look is off. The **Animatek Rack**
+theme uses the colours of the Animatek modules for VCV Rack. These
 settings persist across sessions, as do the window size/position and floater
 layouts.
+
+### Your own themes
+
+Everything about themes is in one window: **View → Themes...** (it opens and closes with the same
+item). Its pages are at the left, like Editor Options:
+
+- **Themes** lists every theme with a little preview of its colours; click one to use it.
+  `Ctrl+T` still cycles through them from anywhere.
+- **Colours** is the theme editor: a swatch for every colour, grouped (LEDs and meters, cables and
+  jacks, morph knobs, sequencers, knobs, modules and canvas, application). The canvas follows while
+  you drag a colour; **Save** writes it as a theme of your own, and closing the window without saving
+  puts the chosen theme back. Tick **Save the render style with the theme** and the theme also turns
+  Wireframe, Hardware look and Flat knobs on or off as they are on screen whenever it is chosen.
+- **Community** lists the themes people share in
+  [animatek/nme-themes](https://github.com/animatek/nme-themes) on GitHub, with a **New** badge on the
+  ones you had not seen and **Update** on those changed since you installed them. One click installs a
+  theme and switches to it. NME looks at that list once a day at most when it starts, and says so in the
+  status bar when there is something new (a dot on View, on the Themes item and on the Community page);
+  **Check Now** looks at once. Editor Options can turn the daily look off. Anyone can add a theme there
+  by pull request: the repository's README says how.
+- **Files** moves themes in and out: **Import** installs a theme file (it is checked first, then
+  copied into your themes folder and chosen; one of yours with the same name is only replaced if you say
+  so), **Export** writes the theme in use to a file you can send to someone, **Save** keeps it with your
+  changes as a file you can edit, **Reload** reads the folder again, and **Open** shows it.
+
+Themes are small JSON files in a `themes` folder next to the settings.
+
+A theme can set the render style. **Animatek Rack** turns Flat knobs on when you
+choose it; choosing a theme that sets none gives you back the style you had
+before. While on such a theme, Editor Options and the shortcuts still change
+it as usual.

@@ -29,6 +29,7 @@ private:
     juce::var moveModule(const juce::var& params);
     juce::var renameModule(const juce::var& params);
     juce::var deleteModule(const juce::var& params);
+    juce::var replaceModule(const juce::var& params);
     juce::var connectCable(const juce::var& params);
     juce::var deleteCable(const juce::var& params);
     juce::var setParameter(const juce::var& params);
@@ -36,6 +37,37 @@ private:
     juce::var openPatch(const juce::var& params);
     juce::var savePatch(const juce::var& params);
     juce::var storeToBank(const juce::var& params);
+
+    // Reading the synth back: connection, slots, events, LEDs and meters.
+    juce::var getSynthStatus(const juce::var& params);
+    juce::var listMidiPorts(const juce::var& params);
+    juce::var connectMidi(const juce::var& params);
+    juce::var disconnectMidi(const juce::var& params);
+    juce::var fetchPatch(const juce::var& params);
+    juce::var getEvents(const juce::var& params);
+    juce::var readLights(const juce::var& params);
+
+    // Front-panel knob, morph group and MIDI CC assignments.
+    juce::var listAssignments(const juce::var& params);
+    juce::var assignKnob(const juce::var& params);
+    juce::var unassignKnob(const juce::var& params);
+    juce::var assignMorph(const juce::var& params);
+    juce::var unassignMorph(const juce::var& params);
+    juce::var assignMidiCc(const juce::var& params);
+    juce::var unassignMidiCc(const juce::var& params);
+
+    // Playing it: a morph dial and a note.
+    juce::var setMorphValue(const juce::var& params);
+    juce::var playNote(const juce::var& params);
+
+    // What a synth bank holds, so a store can pick a free position.
+    juce::var listBank(const juce::var& params);
+
+    // Whole banks to and from disk, straight from and to the synth's flash.
+    juce::var saveBank(const juce::var& params);
+    juce::var sendBank(const juce::var& params);
+    juce::var getBankTransfer(const juce::var& params);
+    juce::var cancelBankTransfer(const juce::var& params);
 
     int resolveSlot(const juce::var& params) const;
 

@@ -47,13 +47,14 @@ On macOS, `Ctrl` is `Cmd`.
 | `F9` | Toggle MIDI CC assignments overlay |
 | `F3` (or `F10`) | Toggle module DSP cost overlay |
 | double-click | Double-click a module to read its DSP cost |
-| `+` / `-` | Step the knob or slider the pointer is over, one value at a time. Hold to repeat; the whole run is one undo step |
-| `Z` | Zoom to selection (or reset when nothing selected) |
+| `+` / `-` | Step the knob, slider or arrow-pair the pointer is over, one value at a time. Hold to repeat; the whole run is one undo step |
+| `Z` | Zoom to the selection; press `Z` again to go back to where you were (reset to 100% when nothing is selected) |
 | `Shift+Z` | Reset zoom to 100% |
 | `Ctrl++` / `Ctrl+-` | Zoom in / out |
 | `Ctrl`+wheel, trackpad pinch | Zoom in / out around the pointer |
 | `Ctrl+T` | Cycle color theme |
 | `Ctrl+W` | Toggle wireframe modules (**macOS: `Cmd+Shift+W`**, because macOS keeps `Cmd+W` for closing windows) |
+| `Ctrl+H` | Toggle hardware look (**macOS: `Cmd+Shift+H`**) |
 | `Ctrl+I` | Toggle the inspector panel (left side) |
 | `Ctrl+Shift+I` | Toggle the patch browser (right side) |
 | `S` | Shake cables |
@@ -71,6 +72,9 @@ On macOS, `Ctrl` is `Cmd`.
 | `Ctrl+Shift+` arrows | Move the focused slot to the neighbouring tile, swapping with whatever is there. Up and down only exist in the four-slot 2x2; nothing happens at an edge |
 | Right-click a slot row | Show/hide that slot's sub-window |
 | Right-click a patch in the Synth browser | **Load to Slot A..D**: fetch it into a named slot |
+| Arrow keys then `Enter` in the Preset browser | Walk the list and load what is selected |
+| Arrow keys over the Inspector's preset list | Walk the module's presets, recalling each as you pass it |
+| The two arrow buttons in the Preset browser | Load the previous or next entry outright, one click per preset |
 | `Ctrl+click` a slot row | Enable/disable the slot without selecting it |
 
 Open slots tile themselves, the way a tiling window manager does: one fills the
